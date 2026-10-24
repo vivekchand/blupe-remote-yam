@@ -27,5 +27,5 @@ Blueprints reached through `@…` mentions and links while reading linked bluepr
 ## Delivery
 
 - Branch: feat/clawmetry-widget
-- Pull Request URL: not raised; upstream PR waits for real acceptance.
+- Pull Request URL: https://github.com/vivekchand/blupe-remote-yam/pull/1
 - Fork: https://github.com/vivekchand/blupe-remote-yam
