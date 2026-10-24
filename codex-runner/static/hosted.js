@@ -1,3 +1,18 @@
+// Optional evidence observers receive only the detached neutral projection.
+// They have no control context; failures never change the runner's flow.
+function notifyYamTelemetry(method, payload) {
+  try {
+    const observer = window.yamTelemetry;
+    if (typeof observer?.[method] !== 'function') return;
+    const view = method === 'observe'
+      ? window.YamTelemetryStatus?.project(payload.state, {robot_id: payload.robot_id, displayed_identity: payload.displayed_identity, received_at_s: Date.now() / 1000})
+      : Object.freeze({schema: 'yam.telemetry.connection.v1', robot_id: payload.robot_id,
+          state: method === 'reset' ? 'reset' : 'unavailable', received_at_s: Date.now() / 1000});
+    if (!view) return;
+    Promise.resolve(observer[method](view)).catch(() => console.warn('Optional telemetry observer is unavailable.'));
+  } catch (_) { console.warn('Optional telemetry observer is unavailable.'); }
+}
+
 // Default to Dream where available; share links can select another model.
 // They never start a run or change which providers the server permits.
 function playgroundEntryModel(search, options, session = {}) {
@@ -277,7 +292,11 @@ function createRunLaunchGuard() {
   let version = 0, phase = 'idle', attemptId = null, conversation = null;
   return {
     get version() {return version;},
-    start(run = null) {phase = 'pending';attemptId = null;conversation = run;return ++version;},
+    start(run = null) {
+      phase = 'pending'; attemptId = null; conversation = run; const current = ++version;
+      if (typeof notifyYamTelemetry === 'function') notifyYamTelemetry('reset', {});
+      return current;
+    },
     accept(request, id, run = {}) {
       if(request !== version) return false;
       phase = 'accepted';attemptId = id;
@@ -1598,6 +1617,8 @@ function createRunLaunchGuard() {
       const li = document.createElement('li'); li.textContent = `#${item.position} · ${item.runner_name || 'Anonymous'} · ${item.status}${item.is_mine ? ' · YOU' : ''}`; return li;
     }) : [Object.assign(document.createElement('li'), {textContent: queue ? 'No one is waiting' : 'Queue unavailable'})]));
     buttons();
+    notifyYamTelemetry('observe', {state, robot_id: selectedRobot,
+      displayed_identity: live ? {attempt_id: live.attempt_id, run_id: live.run_id, episode_id: live.episode_id} : null});
   }
   async function history() {
     const {runs} = await api('/api/recordings');
@@ -2198,7 +2219,7 @@ function createRunLaunchGuard() {
         lastHistory = Date.now();
         try { await history(); } catch (error) { if (!error.stale) message(error.message, true); }
       }
-    } catch (error) { if (!error.stale) { renderRobotStatus('unknown'); $('astraStreamState').textContent = 'Reconnecting'; statusPollError = error.message; message(error.message, true); } }
+    } catch (error) { if (!error.stale) { notifyYamTelemetry('connection', {robot_id: selectedRobot}); renderRobotStatus('unknown'); $('astraStreamState').textContent = 'Reconnecting'; statusPollError = error.message; message(error.message, true); } }
     setTimeout(poll, 1000);
   }
   window.addEventListener('pagehide', () => { $('apiKey').value = ''; });

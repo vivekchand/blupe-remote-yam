@@ -1,6 +1,127 @@
 """Explicit public projection of model messages; never publish wire payloads."""
 import json
 import re
+import math
+import threading
+
+from .public_task_progress import public_text
+
+
+class PublicRedactionUnavailable(Exception):
+    """A public copy cannot safely be made with the bounded known-secret set."""
+
+
+class PublicTextRedactor:
+    """Retain bounded in-memory secrets while this visitor's notes remain visible."""
+
+    def __init__(self, *, max_secrets=256, max_secret_bytes=65536):
+        self._known = set()
+        self._bytes = 0
+        self._available = True
+        self._version = 0
+        self._lock = threading.RLock()
+        self.max_secrets = max_secrets
+        self.max_secret_bytes = max_secret_bytes
+
+    def disable(self):
+        with self._lock:
+            self._available = False
+            self._known.clear()
+            self._bytes = 0
+            self._version += 1
+
+    def remember(self, values):
+        try:
+            with self._lock:
+                if not self._available:
+                    return
+                for index, value in enumerate(values):
+                    if index >= 1024:
+                        self.disable()
+                        return
+                    if not isinstance(value, str) or not value or value in self._known:
+                        continue
+                    size = len(value.encode('utf-8'))
+                    if (len(value) > 4096 or len(self._known) >= self.max_secrets
+                            or self._bytes + size > self.max_secret_bytes):
+                        self.disable()
+                        return
+                    self._known.add(value)
+                    self._bytes += size
+                    self._version += 1
+        except Exception:
+            self.disable()
+
+    def copy(self, value):
+        with self._lock:
+            if not self._available:
+                raise PublicRedactionUnavailable()
+            version = self._version
+            secrets = sorted(self._known, key=len, reverse=True)
+        nodes, characters = 20000, 2 * 1024 * 1024
+
+        def clean_text(text):
+            nonlocal characters
+            characters -= len(text)
+            if characters < 0:
+                raise PublicRedactionUnavailable()
+            for secret in secrets:
+                text = text.replace(secret, '[redacted]')
+            return public_text(text)
+
+        def visit(item, depth=0):
+            nonlocal nodes
+            nodes -= 1
+            if nodes < 0 or depth > 20:
+                raise PublicRedactionUnavailable()
+            if isinstance(item, str):
+                return clean_text(item)
+            if item is None or isinstance(item, (bool, int)):
+                return item
+            if isinstance(item, float):
+                return item if math.isfinite(item) else None
+            if isinstance(item, dict):
+                if not all(isinstance(key, str) for key in item):
+                    raise PublicRedactionUnavailable()
+                return {clean_text(key): visit(part, depth + 1) for key, part in item.items()}
+            if isinstance(item, (list, tuple)):
+                return [visit(part, depth + 1) for part in item]
+            raise PublicRedactionUnavailable()
+
+        result = visit(value)
+        with self._lock:
+            if not self._available or self._version != version:
+                raise PublicRedactionUnavailable()
+        return result
+
+
+def public_run_copy(value, redactor):
+    """Sanitize only the owning local source, without changing its private journal."""
+    try:
+        return redactor.copy(value)
+    except Exception:
+        # Keep the public record shape and safe timing metadata;
+        # arbitrary model text/details are unavailable, never returned unfiltered.
+        # Queue data can add arbitrary keys. On failure even a field name may
+        # contain a secret, so preserve only the known public record schema.
+        allowed = {'run_id', 'attempt_id', 'episode_id', 'runner_name', 'task',
+                   'launch_requested_at', 'status', 'events', 'error', 'step_timings',
+                   'run_metrics', 'model_name', 'launch_route', 'task_progress',
+                   'run_duration_s', 'run_started_at', 'run_ended_at', 'run_elapsed_s',
+                   'source_conversation_shared', 'position', 'session_id', 'created_at'}
+        result = {key: None for key in value if key in allowed}
+        for key in ('launch_requested_at', 'run_duration_s', 'run_started_at', 'run_ended_at', 'run_elapsed_s'):
+            number = value.get(key)
+            if type(number) in (int, float) and abs(number) <= 1e15 and math.isfinite(number):
+                result[key] = number
+        status = value.get('status')
+        if isinstance(status, str) and status in {'idle', 'queued', 'preparing', 'running', 'stopping', 'stopped',
+                      'completed', 'failed', 'disconnected', 'safety_aborted', 'timed_out'}:
+            result['status'] = status
+        result.update(events=[], step_timings=[], runner_name='Anonymous', error=None,
+                      source_conversation_shared=value.get('source_conversation_shared') is True,
+                      warning='Public model text is unavailable.')
+        return result
 
 
 def request_images(content, recorder):

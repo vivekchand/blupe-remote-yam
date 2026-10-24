@@ -138,7 +138,9 @@ test('status outage and recovery clear stale labels and errors; history failure 
   const nodes = {station:{dataset:{}}, status:{}, message:{textContent:''}, astraStreamState:{}};
   let response = new Error('Status temporarily unavailable');
   let historyFails = false;
+  const telemetry = [];
   const c = launchContext({
+    notifyYamTelemetry(method, payload){telemetry.push({method, robot_id:payload.robot_id});}, selectedRobot:'yam-1',
     $: id => nodes[id], ended:false, csrf:'test-session', lastHistory:Date.now(), setTimeout(){},
     api:async()=>{if (response instanceof Error) throw response; return response;},
     message(text){nodes.message.textContent=text;},
@@ -152,6 +154,7 @@ test('status outage and recovery clear stale labels and errors; history failure 
   await c.poll();
   assert.equal(nodes.station.textContent, 'Checking / unavailable');
   assert.equal(nodes.message.textContent, 'Status temporarily unavailable');
+  assert.deepEqual(telemetry, [{method:'connection', robot_id:'yam-1'}]);
   response = {label:'Ready for the next run'};
   await c.poll();
   assert.equal(nodes.station.textContent, response.label);
@@ -160,4 +163,5 @@ test('status outage and recovery clear stale labels and errors; history failure 
   await c.poll();
   assert.equal(nodes.station.textContent, response.label);
   assert.equal(nodes.message.textContent, 'History unavailable');
+  assert.equal(telemetry.length, 1); // History errors do not mark valid station evidence unavailable.
 });

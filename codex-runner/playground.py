@@ -31,6 +31,7 @@ from remote_yam.interactions import list_recordings, read_recording
 from remote_yam.socials import social_handles, save_handles
 from remote_yam.artifacts import log_archive, run_artifacts
 from remote_yam.providers import RepeatingRaiseLowerAdapter
+from remote_yam.public_conversation import PublicTextRedactor, public_run_copy
 from remote_yam.robocurve_policy import OpenAIAdapter, AstraAdapter
 from remote_yam.session import HttpSessionAPI, MockSessionAPI
 from remote_yam.reactions import Reactions, EMOJIS
@@ -74,9 +75,31 @@ class HostedSessionAPI(HttpSessionAPI):
 
 class EphemeralController(RunnerController):
     """Release the adapter's retained credential after every worker exit."""
+    def retain_public_secrets(self, extra=()):
+        redactor = getattr(self, '_public_redactor', None)
+        if redactor is None:
+            return
+        try:
+            with self._lock:
+                provider_key = getattr(self._provider, '_api_key', None)
+                publisher = getattr(self, '_conversation_publisher', None)
+                retained = getattr(publisher, '_secrets', ())
+                capabilities = getattr(self._session_api, '_session_capabilities', {})
+                # Snapshot mutable containers before iterating, so ordinary status/
+                # session activity cannot invalidate an otherwise safe public copy.
+                if len(capabilities) > redactor.max_secrets or len(retained) > redactor.max_secrets:
+                    redactor.disable()
+                    return
+                from itertools import chain
+                redactor.remember(chain(extra, (provider_key, self._lease_id), tuple(retained),
+                                        tuple(capabilities.values())))
+        except Exception:
+            redactor.disable()
+
     def forget_key(self):
         self._stop_event.set()
         with self._lock:
+            self.retain_public_secrets()
             if self._provider is not None and hasattr(self._provider, "_api_key"):
                 self._provider._api_key = ""
             close = getattr(self._provider, 'close_transport', None)
@@ -112,8 +135,10 @@ class Visitor:
     runner_name: str = "Anonymous"
     runner_session_id: str | None = None
     episode_ids: set[str] = field(default_factory=set)
+    public_episode_consent: dict[str, bool] = field(default_factory=dict, repr=False)
     launches: int = 0
     saved_keys: dict[str, str] = field(default_factory=dict, repr=False)
+    public_redactor: PublicTextRedactor = field(default_factory=PublicTextRedactor, repr=False)
     subscription_prompts: dict[str, str] = field(default_factory=dict)
     visitor_chat: object | None = field(default=None, repr=False)
     retired: bool = False
@@ -124,6 +149,7 @@ class Visitor:
             self.retired = True
             self.saved_keys.clear()
             self.episode_ids.clear()
+            self.public_episode_consent.clear()
             self.visitor_chat = None
             self.controller.forget_key()
             self.controller.disconnect("web_session_ended")
@@ -278,6 +304,14 @@ class HostedRunner:
         """Additional session metadata/headers; Origin and JSON are checked."""
         return {}, []
 
+    async def status_extension(self, visitor, state):
+        """Optional observation metadata for this validated visitor's status.
+
+        Returning None preserves the standalone response. Extensions must not
+        change controller behavior or include credentials/capabilities.
+        """
+        return None
+
     async def action_extension(self, path, visitor, payload, cookies, send):
         """Optional actions after visitor, Origin and CSRF validation."""
         return False
@@ -311,6 +345,10 @@ class HostedRunner:
         eid = state.get('episode_id')
         if eid and visitor.runner_session_id and state.get('session_id') == visitor.runner_session_id:
             visitor.episode_ids.add(eid)
+            # Keep source-bound consent for the native allowance's 20 runs.
+            # Older known episodes remain owned but default to no public text.
+            if eid in visitor.public_episode_consent or len(visitor.public_episode_consent) < 20:
+                visitor.public_episode_consent[eid] = state.get('source_conversation_shared') is True
             try:
                 self.run_names.remember_metadata(eid, self.robot_id, visitor.runner_task, state.get("run_started_at"), state.get("run_configuration"))
                 self.run_names.remember_result(eid, state)
@@ -334,6 +372,8 @@ class HostedRunner:
             LoggedSessionAPI(self.api_factory(), self.submission_log), hardware_control_enabled=self.hardware_control,
             recording_root=directory, robot_id=self.robot_id, joint_counts=self.joint_counts,
             share_conversation=self.share_conversation), directory)
+        visitor.controller._public_redactor = visitor.public_redactor
+        visitor.public_redactor.remember((capability, visitor.csrf))
         self.visitors[capability] = visitor
         return capability, visitor
 
@@ -724,12 +764,28 @@ class HostedRunner:
             state['runner_name'] = visitor.runner_name
             state['whats_running'] = []
             candidates = []
+            public_owners = {}
+            public_episodes = {}
+            station_run = (state.get('queue_snapshot') or {}).get('public_run') or {}
+            station_episode = station_run.get('run_id')
             for other in list(self.visitors.values()):
                 current = other.controller.status()
+                other.controller.retain_public_secrets(tuple(other.saved_keys.values()))
+                if current.get('episode_id'):
+                    public_episodes[current['episode_id']] = (
+                        other.public_redactor, current.get('source_conversation_shared') is True)
+                if station_episode and station_episode in other.episode_ids and station_episode != current.get('episode_id'):
+                    public_episodes[station_episode] = (
+                        other.public_redactor, other.public_episode_consent.get(station_episode) is True)
+                public_labels = public_run_copy({'runner_name': other.runner_name,
+                    'task': other.runner_task, 'status': current['status']}, other.public_redactor)
+                if other.runner_session_id:
+                    public_owners[other.runner_session_id] = (
+                        public_labels.get('runner_name', 'Anonymous'), other.public_redactor)
                 running = current.get('status') in {'preparing', 'running'}
                 if running:
-                    state['whats_running'].append({'runner_name': other.runner_name,
-                        'task': other.runner_task, 'status': current['status']})
+                    state['whats_running'].append({key: public_labels.get(key)
+                        for key in ('runner_name', 'task', 'status')})
                 if (other.runner_session_id or (other.runner_task and
                         ((current.get('provider') or {}).get('task_progress') or (current.get('provider') or {}).get('managed_execution')))) and current.get('status') != 'queued':
                     candidates.append((running, other.last_launch, other, current))
@@ -739,10 +795,12 @@ class HostedRunner:
                 from remote_yam.public_conversation import project_events
                 from remote_yam.run_errors import public_run_error
                 from remote_yam.past_runs import public_robot_error
+                source_shared = current.get('source_conversation_shared') is True
                 events = project_events((current.get('interactions') or {}).get('events', []),
-                                        (current.get('interactions') or {}).get('run_id'))
-                state['public_run'] = {'run_id': (current.get('interactions') or {}).get('run_id'),
-                    'attempt_id': current.get('attempt_id'),
+                                        (current.get('interactions') or {}).get('run_id')) if source_shared else []
+                state['public_run'] = public_run_copy({'run_id': (current.get('interactions') or {}).get('run_id'),
+                    'source_conversation_shared': source_shared,
+                    'attempt_id': current.get('source_conversation_attempt_id'),
                     'runner_name': owner.runner_name, 'task': owner.runner_task,
                     'launch_requested_at': owner.launch_requested_at,
                     'status': current['status'], 'events': events, 'error': public_run_error(current),
@@ -752,8 +810,18 @@ class HostedRunner:
                     'model_name': model_display_name(current.get('provider')),
                     **({'launch_route':current['provider']['launch_route']} if (current.get('provider') or {}).get('launch_route') else {}),
                     **({'task_progress':current['provider']['task_progress']} if (current.get('provider') or {}).get('task_progress') else {}),
-                    **{k: current.get(k) for k in ('run_duration_s', 'run_started_at', 'run_ended_at', 'run_elapsed_s')}}
-            shared_run = (state.get('queue_snapshot') or {}).get('public_run')
+                    **{k: current.get(k) for k in ('run_duration_s', 'run_started_at', 'run_ended_at', 'run_elapsed_s')}}, owner.public_redactor)
+            queue_snapshot = state.get('queue_snapshot') or {}
+            shared_run = queue_snapshot.get('public_run')
+            source = public_episodes.get(shared_run.get('run_id')) if isinstance(shared_run, dict) else None
+            if source:
+                # The station can publish another copy of this local source.
+                # Mask it with its owner, never with an unrelated observer's key.
+                redactor, source_shared = source
+                shared_run = public_run_copy({**shared_run,
+                    'events': shared_run.get('events', []) if source_shared else [],
+                    'source_conversation_shared': source_shared}, redactor)
+                queue_snapshot['public_run'] = shared_run
             same_run = (shared_run and state['public_run'] and shared_run.get('run_id')
                         and shared_run['run_id'] == state['public_run'].get('episode_id'))
             newer_shared_run = (shared_run and state['public_run']
@@ -770,9 +838,13 @@ class HostedRunner:
                         and not shared_run.get('model_name')):
                     shared_run = {**shared_run, 'model_name': local_run['model_name']}
                 state['public_run'] = shared_run
-            names = {v.runner_session_id: v.runner_name for v in list(self.visitors.values()) if v.runner_session_id}
             for entry in (state.get('queue_snapshot') or {}).get('entries', []):
-                entry['runner_name'] = names.get(entry.get('session_id'), 'Anonymous')
+                source = public_owners.get(entry.get('session_id'))
+                entry['runner_name'] = source[0] if source else 'Anonymous'
+                if source:
+                    sanitized = public_run_copy(entry, source[1])
+                    entry.clear()
+                    entry.update(sanitized)
             # Camera URLs, filesystem paths, and transport details aren't UI data.
             observation = state.get("last_observation")
             if isinstance(observation, dict):
@@ -788,6 +860,13 @@ class HostedRunner:
             state.pop("lease_id", None)
             state["saved_key_providers"] = sorted(visitor.saved_keys)
             state["key_configured"] = bool(visitor.saved_keys)
+            try:
+                metadata = await self.status_extension(visitor, state)
+                if isinstance(metadata, dict):
+                    state['telemetry'] = metadata
+            except Exception:
+                # Observability must never prevent the native status response.
+                state['telemetry'] = {'state': 'unavailable', 'public_run_shared': False}
             await self.json(send, 200, state)
         elif path.startswith("/api/monitor/cameras/"):
             name = path.rsplit("/", 1)[1]
@@ -1075,6 +1154,7 @@ class HostedRunner:
                 provider = provider_transform(provider)
             if launch_route:
                 provider.launch_route = launch_route
+            visitor.public_redactor.remember((key,))
             visitor.last_launch = time.monotonic()
             visitor.launch_requested_at = time.time()
             visitor.launches += 1

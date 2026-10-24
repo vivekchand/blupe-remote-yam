@@ -42,6 +42,8 @@ class RunnerController(HomeSceneStartup):
         self._home_accepted_scene = None
         self._home_accepted_job = None
         self._share_conversation = share_conversation
+        self._run_share_conversation = False
+        self._source_conversation_attempt_id = None
         self._conversation_publisher = None
         self._session_api = session_api
         self._joint_counts = joint_counts
@@ -202,6 +204,9 @@ class RunnerController(HomeSceneStartup):
             if not directory and self._recording_root:
                 directory = self._recording_root/('run_'+uuid.uuid4().hex)
             self._interactions = InteractionLog(directory)
+            self._source_conversation_attempt_id = self._attempt_id
+            if not prepared:
+                self._run_share_conversation = bool(self._share_conversation)
             if self._conversation_publisher:
                 self._conversation_publisher.close()
             self._conversation_publisher = None
@@ -293,6 +298,8 @@ class RunnerController(HomeSceneStartup):
                 self._last_model_command=None;self._last_observation=None
                 self._feedback_checks=[];self._queue_position=None
                 self._interactions=InteractionLog(provider.public_config().get('recording_path'))
+                self._run_share_conversation=bool(self._share_conversation)
+                self._source_conversation_attempt_id=self._attempt_id
                 journal=self._interactions
                 prior_sink=getattr(provider,'interaction_sink',None)
                 def preparation_event(kind,message,**details):
@@ -364,6 +371,8 @@ class RunnerController(HomeSceneStartup):
             self._last_model_command=None;self._last_observation=None
             self._feedback_checks=[];self._queue_position=None
             self._interactions=InteractionLog(provider.public_config().get('recording_path'))
+            self._run_share_conversation=bool(self._share_conversation)
+            self._source_conversation_attempt_id=self._attempt_id
             journal=self._interactions
             prior_sink=getattr(provider,'interaction_sink',None)
             def preparation_event(kind,message,**details):
@@ -563,6 +572,8 @@ class RunnerController(HomeSceneStartup):
                 "prompt_configured": bool(self._prompt),
                 "heartbeat_sent": self._heartbeat_seen,
                 "conversation_sharing": self._conversation_publisher.status() if self._conversation_publisher else {"enabled": False},
+                "source_conversation_shared": self._run_share_conversation,
+                "source_conversation_attempt_id": self._source_conversation_attempt_id,
                 "last_event_type": self._last_event_type,
                 "last_model_command": self._last_model_command,
                 "last_observation": self._display_observation(),

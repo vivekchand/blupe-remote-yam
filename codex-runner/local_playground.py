@@ -341,7 +341,11 @@ def serve(args):
     if dream_credentials is None:
         saved_dream = Path.home() / '.dreamlabs/credentials'
         dream_credentials = str(saved_dream) if saved_dream.is_file() else ''
-    app = fleet(LocalPlayground, dict(public_origin=origin, session_api=args.session_api,
+    runner_type = LocalPlayground
+    if getattr(args, 'clawmetry', False):
+        from clawmetry_playground import ClawMetryPlayground
+        runner_type = ClawMetryPlayground
+    app = fleet(runner_type, dict(public_origin=origin, session_api=args.session_api,
         camera_origin=args.camera_origin or args.session_api or 'http://127.0.0.1:8089',
         astra_endpoint=os.environ.get('ASTRA_ENDPOINT', ''),
         groot_key_file=groot_key_file,
