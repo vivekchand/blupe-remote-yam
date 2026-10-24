@@ -411,6 +411,7 @@ def main() -> None:
     parser.add_argument("--claude-login", action="store_true", help="Sign in to Claude Code with your Claude account if needed, then launch the runner")
     parser.add_argument("--no-key-prompt", action="store_true", help="Do not request a missing provider key when Join Queue is invoked")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--clawmetry", action="store_true", help="Show the optional ClawMetry evidence panel in the playground")
     parser.add_argument("--no-share-conversation", action="store_true", help="Keep model conversation local instead of publishing it to the public playground")
     parser.add_argument("--legacy-ui", action="store_true", help="Use the older developer monitor instead of the shared playground UI")
     parser.add_argument("--aspire-config", help="Station configuration for Codex-generated ASPIRE programs")

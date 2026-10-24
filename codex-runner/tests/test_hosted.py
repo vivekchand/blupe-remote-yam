@@ -298,7 +298,7 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         current=owner.controller.status()
         progress={'task':'Stack two blocks','updates':[{'happened':'Writing code','changed':'New behavior needed','next_action':'Test plan'}]}
         with patch.object(owner.controller,'status',return_value={**current,'status':'preparing',
-                'attempt_id':'new-preparation','provider':{'task_progress':progress}}):
+                'attempt_id':'new-preparation','source_conversation_attempt_id':'new-preparation','provider':{'task_progress':progress}}):
             code,state,_=await self.call('/api/status',**browser)
         self.assertEqual(code,200)
         self.assertEqual(state['public_run']['task_progress'],progress)
@@ -328,7 +328,7 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
                 'error':'Prior error','run_started_at':100}}
         current=owner.controller.status()
         with patch.object(owner.controller,'status',return_value={**current,'status':'preparing',
-                'attempt_id':'new-attempt','provider':{'task_progress':{'task':'Same prompt'}}}):
+                'attempt_id':'new-attempt','source_conversation_attempt_id':'new-attempt','provider':{'task_progress':{'task':'Same prompt'}}}):
             state=(await self.call('/api/status',**browser))[1]
         self.assertEqual(state['public_run']['attempt_id'],'new-attempt')
         self.assertIsNone(state['public_run']['error'])
@@ -397,7 +397,8 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         owner.controller.update_queue_snapshot(self.app.queue)
         with patch.object(owner.controller, 'status', return_value={**owner.controller.status(), 'status':'running', 'episode_id':'episode-one'}):
             state = (await self.call('/api/status', **browser))[1]
-        self.assertEqual(state['public_run']['events'][-1]['message'], 'Full local answer')
+        self.assertEqual(state['public_run']['events'], [])
+        self.assertIn('Full local answer', json.dumps(state['interactions']['events']))
 
     async def test_run_error_is_shared_with_all_spectators_and_clears(self):
         owner_browser, b, c = await self.session(), await self.session(), await self.session()
