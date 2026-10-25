@@ -86,6 +86,14 @@
       ready: typeof safety.ok === 'boolean' ? safety.ok : null, settled: typeof source.settled === 'boolean' ? source.settled : null,
       step_id: count(source.step_id), arms};
   }
+  function detailPath(metadata, displayed) {
+    const detail = object(metadata.detail);
+    if (typeof detail.path !== 'string' || !/^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(detail.path)) return null;
+    const same = id(detail.attempt_id) && id(displayed.attempt_id) ? detail.attempt_id === displayed.attempt_id
+      : id(detail.public_run_id) && id(displayed.run_id) ? detail.public_run_id === displayed.run_id
+      : !!(id(detail.episode_id) && detail.episode_id === id(displayed.episode_id));
+    return same ? detail.path : null;
+  }
   function project(input, options = {}) {
     const state = object(input), metadata = object(state.telemetry), candidate = object(state.public_run);
     const displayed = object(options.displayed_identity);
@@ -105,6 +113,7 @@
     return freeze({schema: 'yam.telemetry.v1', robot_id: robot,
       received_at_s: finite(options.received_at_s) ? options.received_at_s : Date.now() / 1000,
       scope: shared ? 'shared_public_run' : 'not_shared',
+      detail_path: detailPath(metadata, displayed),
       identity: {attempt_id: attempt, public_run_id: publicRun, episode_id: episode,
         recording_run_id: shared && matchesOwn ? id(object(state.interactions).run_id) : null,
         session_id: matchesOwn ? id(state.session_id) : null},
@@ -122,7 +131,7 @@
       coverage: {private_reasoning: false, physical_motion_confirmed: false, physical_stop_confirmed: false,
         capture: 'Published run output and received reports only. Independent camera and robot clocks.'}});
   }
-  const api = {project, toolCalls, measurement, text};
+  const api = {project, toolCalls, measurement, text, detailPath};
   if (typeof window !== 'undefined') window.YamTelemetryStatus = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

@@ -52,7 +52,7 @@ def model_display_name(provider):
             return match[1].title() + ' ' + match[2] + ('.' + match[3] if match[3] else '')
         return model or "Claude"
     return {"groot": "GR00T", "local_raise_lower": "Built-in policy"}.get(name,
-        'Astra' if not model or model == 'gpt-6-astra' else model)
+        'Astra' if model == 'gpt-6-astra' else model or 'Model not recorded')
 
 
 class RequestError(Exception):
@@ -807,7 +807,7 @@ class HostedRunner:
                     'step_timings': current.get('step_timings', []),
                     'run_metrics': current.get('run_metrics'),
                     'episode_id': current.get('episode_id'),
-                    'model_name': model_display_name(current.get('provider')),
+                    'model_name': model_display_name(current.get('provider') or current.get('source_model')),
                     **({'launch_route':current['provider']['launch_route']} if (current.get('provider') or {}).get('launch_route') else {}),
                     **({'task_progress':current['provider']['task_progress']} if (current.get('provider') or {}).get('task_progress') else {}),
                     **{k: current.get(k) for k in ('run_duration_s', 'run_started_at', 'run_ended_at', 'run_elapsed_s')}}, owner.public_redactor)

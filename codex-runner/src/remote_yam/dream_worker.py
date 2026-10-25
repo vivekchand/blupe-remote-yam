@@ -2,7 +2,7 @@
 import json
 import http.client
 import ssl
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import math
 import os
 from pathlib import Path
@@ -154,6 +154,11 @@ def main():
         from latency_spans import timed_span, journal_span
         from dream_sdk_trace import DreamSDKTrace
 
+    try:
+        from .worker_observer import WorkerObserver
+    except ImportError:
+        from worker_observer import WorkerObserver
+    observer = None
     sdk_trace = DreamSDKTrace(os.environ['DREAM_WORK_DIR'])
 
     def stage_event(kind, message, **details):
@@ -195,12 +200,17 @@ def main():
     def close(*_):
         for current in all_clients():
             current.close()
+        if observer is not None:
+            observer.close()
         raise SystemExit(0)
 
     def configure(client, command, spans):
-        nonlocal linear_algebra
+        nonlocal linear_algebra, observer
         if dream.__version__ != '1.0.0':
             raise ValueError('Unsupported Dream SDK version')
+        if observer is None:
+            observer = WorkerObserver(os.environ.get('YAM_WORKER_OBSERVER_MODULE'),
+                                      os.environ.get('YAM_WORKER_OBSERVER_CONTEXT'))
         if os.environ.get('YAM_DREAM_BLOCKWISE_IK', '0') == '1':
             try:
                 from .dream_ik_blockwise import install_blockwise_gram
@@ -221,6 +231,7 @@ def main():
                               for role in ('overhead', 'wrist_l', 'wrist_r')}},
                 _record=False))
         sdk_trace.install(client)
+        observer.install(client, source_trace=sdk_trace)
 
     def handle(command, spans):
         # Request payloads/arrays/actions live only in this call's frame, not in
@@ -302,8 +313,9 @@ def main():
             with stage(spans, 'sdk_get_action'):
                 close_http_connection(client)
                 try:
-                    with sdk_trace.prediction(command.get('first_step_id')):
-                        action = client.get_action(commanded=command.get('commanded'))
+                    with (observer.prediction(command.get('observer_context') or {}) if observer is not None else nullcontext()):
+                        with sdk_trace.prediction(command.get('first_step_id')):
+                            action = client.get_action(commanded=command.get('commanded'))
                 finally:
                     close_http_connection(client)
             return {'action': action, 'timing': client.last_timing}
@@ -324,6 +336,10 @@ def main():
             except Exception as error:
                 response = error_response(error, phase=phase,
                                           timing=client.last_timing if request_started else None)
+            if observer is not None:
+                metadata = observer.drain()
+                if metadata is not None:
+                    response['observer'] = metadata
             response['stage_timings'] = startup_spans + spans
             startup_spans = []
             print(json.dumps(response, default=lambda value: value.tolist(), allow_nan=False), flush=True)
@@ -334,6 +350,8 @@ def main():
         for current in all_clients():
             current.close()
         sdk_trace.close()
+        if observer is not None:
+            observer.close()
 
 
 if __name__ == '__main__':

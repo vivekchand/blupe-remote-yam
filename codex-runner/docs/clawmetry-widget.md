@@ -42,3 +42,72 @@ Publication consent is captured with the actual source journal/attempt. A future
 `clawmetry_hosted.create_app(origin, runner_type=ApplicationSubclass)` accepts a trusted subclass of `ClawMetryPlayground`. Omitting the argument preserves the standard class and the existing HTTPS, queue, visitor-owned provider and localhost-only subscription restrictions. Application selection is server code, never a browser-supplied class or import path.
 
 Applications can override `telemetry_secrets(visitor)` to extend the default in-memory secret tuple from `super().telemetry_secrets(visitor)`. The optional recorder resolves this method dynamically. Return a bounded tuple of known nonempty strings, or raise when the supplier is unavailable; failures and malformed values reach the private consumer rather than becoming an empty-secret success. Additional application secrets must also be remembered in that visitor's `public_redactor` before any native public output. This hook supplies existing in-memory values; it adds no credential loading, requests, polling or control authority.
+
+
+## Trusted worker observation and packet decisions
+
+`DreamWorker(..., observer_module=None, observer_context_path=None)` defaults to no
+extension. Only service code selects these local paths; inherited observer path
+variables are stripped. After the existing SDK1.0.0 version check, the worker loads
+the module's `create_observer(context_path=...)`. The object may implement
+`install(client, source_trace=...)`, `prediction(context)` as a context manager,
+`drain()` and `close()`. The existing SDK trace object permits observation of
+actual native stage identities. The extension owns its sanitized capture and
+bounded asynchronous storage. It must never modify the SDK's request, response,
+return values, exceptions or HTTP connection policy. No headers or model payloads
+are added to the public event channel by these hooks.
+
+`DreamAdapter(..., run_context=None)` accepts a trusted callable for native
+attempt/session/episode/robot identifiers. Each worker prediction receives an
+independent `call_id`, `first_step_id`, model and actual available observation
+source/time. Additional context fields are discarded. The adapter does not load
+credentials or change the selected checkpoint through this hook.
+
+Every worker reply can include top-level `observer` metadata, including native
+error/reset/release replies. Metadata is detached JSON, limited to32KiB,64rows
+per list/object and depth8. The service's recorder consumes these references;
+they are not a wire-payload transport or a public sharing grant. Missing,
+throwing or malformed observers leave native action/error behavior intact and
+report unavailable coverage. Shutdown is best effort; extensions must keep all
+callbacks bounded and avoid blocking native control.
+
+`RunnerController(..., trajectory_decision=None)` is an optional trusted service
+callback `(waypoints, observation, context) -> {'decision': 'allow' | 'reject'}`.
+Native plan/schema validation precedes it. Arguments are detached and returned
+replacement targets are ignored. Context contains source attempt/session/episode,
+robot/trajectory/first-step IDs and10Hz cadence; available measured timestamps
+remain in the supplied observation. An installed callback must explicitly allow;
+exceptions/malformed decisions/refusals send no packet. Native Stop, session,
+lease, episode and attempt checks run again afterward and before submission.
+Home/parking remain native and separate. Refusing a future packet does not prove
+physical stopping. Default `None` preserves ordinary dispatch.
+
+Source model/provider identity survives provider cleanup using only bounded
+fields from that run's captured configuration in `status.source_model`. The live
+`status.provider` still becomes null after cleanup. Unknown identity is shown as
+`Model not recorded`, never inferred from a future model picker.
+
+A service may supply `state.telemetry.detail = {path, attempt_id}` (or matching
+`public_run_id`/`episode_id` when an attempt ID is unavailable). Only the exact
+same-origin path `/clawmetry/trace/<32 lowercase hex characters>` for the displayed
+source enables **Open full trace**, in a new tab with `noopener noreferrer`.
+Queries, fragments, credentials and external URLs are rejected. The service must
+implement ownership and sharing checks on that route; the link grants no access.
+Absent metadata preserves the ordinary panel and adds no request or poll.
+
+
+For actual native transformation evidence, `DreamAdapter(...,
+evidence_observer=None)` accepts a trusted one-argument callback. Immediately
+after each source calculation it receives detached JSON
+`{layer, waypoints, first_step_id, context}`. The layers are `nominal_waypoints`
+and `motion_limited_waypoints`; `context` carries the exact corresponding worker
+prediction's call/source IDs. Returned values are ignored. Missing/throwing
+callbacks do not change targets, results or native validation. This is a private
+service observation seam, with no public publication or enforcement behavior.
+
+
+Selected camera ticks retain a bounded `frame_sources` mapping using the same
+model-video keys as `frames`, with actual `source_captured_at_s` (or null when
+unavailable) and `received_at_s` per frame. These source camera clocks remain
+separate from measured-state `observed_at` and SDK monotonic tick time. This adds
+no images, public event or poll; service observation can preserve exact provenance.
