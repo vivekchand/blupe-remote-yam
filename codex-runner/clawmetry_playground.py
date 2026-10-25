@@ -34,6 +34,10 @@ def _secrets(visitor):
 class ClawMetryMixin:
     """Compose with an existing hosted product without replacing its hooks."""
 
+    def telemetry_secrets(self, visitor):
+        """Supply known in-memory secrets to the optional private recorder."""
+        return _secrets(visitor)
+
     def page(self):
         page = super().page()
         marker = b'<!-- application-head -->'
@@ -54,7 +58,7 @@ class ClawMetryMixin:
             from clawmetry_pro.robotics.blupe_playground import attach_controller
             attachment = attach_controller(
                 visitor.controller, capture_text=True,
-                secrets=lambda: _secrets(visitor),
+                secrets=lambda: self.telemetry_secrets(visitor),
                 source_shared=lambda: getattr(visitor.controller, '_run_share_conversation', False) is True,
                 environment='simulation' if self.simulation else 'hardware',
             )

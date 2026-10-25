@@ -14,10 +14,13 @@ from local_playground import PUBLIC_SESSION_API
 from multi_robot import fleet
 
 
-def create_app(origin, *, session_api=PUBLIC_SESSION_API, allow_hardware_control=True):
+def create_app(origin, *, session_api=PUBLIC_SESSION_API, allow_hardware_control=True,
+               runner_type=ClawMetryPlayground):
+    if not isinstance(runner_type, type) or not issubclass(runner_type, ClawMetryPlayground):
+        raise TypeError('Choose a ClawMetryPlayground application class')
     robots = json.loads((Path(__file__).parent / 'config/robots.json').read_text())
     # Provider credentials are supplied per visitor through the native UI.
-    return fleet(ClawMetryPlayground, dict(
+    return fleet(runner_type, dict(
         public_origin=origin, session_api=session_api, camera_origin=session_api,
         development=False, hardware_control=allow_hardware_control,
         max_sessions=8,
