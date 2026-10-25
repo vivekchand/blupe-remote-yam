@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
@@ -17,7 +18,7 @@ from .feedback import feedback_decision, feedback_fields
 from .providers import PolicyComplete, ProviderAdapter
 from .interactions import InteractionLog
 from .latency_spans import journal_span
-from .session import MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET, SCHEMA_VERSION, TERMINAL_STATES, SessionAPI, SessionAPIError, SessionEventStream
+from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET, SCHEMA_VERSION, TERMINAL_STATES, SessionAPI, SessionAPIError, SessionEventStream
 
 
 FEEDBACK_WAIT_S = 5.0
@@ -35,7 +36,9 @@ class RunnerController(HomeSceneStartup):
         recording_root: Path | None = None,
         joint_counts=(6,6),
         share_conversation: bool = True,
+        trajectory_decision=None,
     ) -> None:
+        self.trajectory_decision = trajectory_decision
         self._home_plan = None
         self._home_registered = False
         self._home_sample_recorded = False
@@ -79,6 +82,7 @@ class RunnerController(HomeSceneStartup):
         self._operator_requested = False
         self._error: str | None = None
         self._deadline_cancelled_session: str | None = None
+        self._command_limit = MAX_COMMANDS
         self._safety_error: dict[str, Any] | None = None
         self._run_events: list[dict[str, Any]] = []
         self._submitted_step_ids: list[int] = []
@@ -137,6 +141,10 @@ class RunnerController(HomeSceneStartup):
         admission = getattr(provider, 'validate_session_admission', None)
         if callable(admission):
             admission(self._session_api)
+        self._command_limit = command_budget(getattr(provider, 'provider_name', ''), run_duration_s)
+        configure_duration = getattr(provider, 'configure_run_duration', None)
+        if getattr(provider, 'provider_name', '') in ('dream', 'dream_flash') and callable(configure_duration):
+            configure_duration(run_duration_s)
         duration_options = {}
         if run_duration_s != 300:
             duration_options['run_duration_s'] = run_duration_s
@@ -545,6 +553,12 @@ class RunnerController(HomeSceneStartup):
             if getattr(self, "_run_started_at", None) and self._is_terminal(self._status) and getattr(self, "_run_ended_at", None) is None:
                 self._run_ended_at = time.time()
             provider_config = self._provider.public_config() if self._provider else None
+            # Keep historical attribution separate from the live-provider
+            # contract, which correctly becomes None after cleanup.
+            configuration = self._run_configuration if isinstance(self._run_configuration, dict) else {}
+            source_model = {key: value for key in ('provider', 'model')
+                if isinstance((value := configuration.get(key)), str)
+                and 0 < len(value) <= 256} or None
             contact_issue = getattr(self._session_api, "contact_issue", None)
             if not isinstance(contact_issue, dict):
                 contact_issue = (provider_config or {}).get("server_contact_issue")
@@ -569,6 +583,7 @@ class RunnerController(HomeSceneStartup):
                 "first_call_wander_enabled": self._first_call_wander,
                 "command_transport": "trajectory" if getattr(self._session_api, "supports_trajectories", False) is True else "single_action",
                 "provider": provider_config,
+                "source_model": source_model,
                 "prompt_configured": bool(self._prompt),
                 "heartbeat_sent": self._heartbeat_seen,
                 "conversation_sharing": self._conversation_publisher.status() if self._conversation_publisher else {"enabled": False},
@@ -959,8 +974,8 @@ class RunnerController(HomeSceneStartup):
             self._note_latency("command_settle", (time.monotonic() - submitted_at) * 1000.0)
         if provider is None or session_id is None or not episode_id or not lease_id:
             raise RuntimeError("Observation is missing runner lease context")
-        if step_id >= MAX_COMMANDS:
-            raise RuntimeError(f"Session command limit of {MAX_COMMANDS} reached")
+        if step_id >= self._command_limit:
+            raise RuntimeError(f"Session command limit of {self._command_limit} reached")
         readiness = getattr(provider, 'wait_ready', None)
         timing_sink = self._interactions.add if getattr(provider, 'provider_name', '') in {'dream', 'dream_flash'} else None
         if timing_sink and step_id == 0:
@@ -1241,11 +1256,14 @@ class RunnerController(HomeSceneStartup):
         lease_id: str,
         first_step_id: int,
     ) -> None:
+        with self._lock:
+            source_attempt_id = self._attempt_id
         def still_running():
             with self._lock:
                 return (not self._provider_cancelled(provider) and self._status == "running"
                         and self._provider is provider and self._session_id == session_id
-                        and self._episode_id == episode_id and self._lease_id == lease_id)
+                        and self._episode_id == episode_id and self._lease_id == lease_id
+                        and self._attempt_id == source_attempt_id)
 
         if hasattr(provider, "cancelled"):
             provider.cancelled = lambda: not still_running()
@@ -1341,7 +1359,7 @@ class RunnerController(HomeSceneStartup):
         if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= MAX_WAYPOINTS_PER_PACKET:
             raise RuntimeError(f"Trajectory provider must return 1..{MAX_WAYPOINTS_PER_PACKET} waypoints")
         expected_steps = list(range(first_step_id, first_step_id + len(waypoints)))
-        if expected_steps[-1] >= MAX_COMMANDS:
+        if expected_steps[-1] >= self._command_limit:
             raise RuntimeError("Trajectory exceeds the session command limit")
         allowed = {"step_id", "left_joints_deg", "right_joints_deg", "left_gripper", "right_gripper"}
         required = {"step_id", "left_joints_deg", "right_joints_deg"}
@@ -1385,6 +1403,33 @@ class RunnerController(HomeSceneStartup):
             "step_number": step_number,
             "gap_s": max(0.0, model_started - previous_completed) if previous_completed is not None else None,
         }
+        decision_callback = self.trajectory_decision
+        if decision_callback is not None:
+            # Apply the transport's exact numeric/shape validation before a
+            # trusted enforcement decision. Ignore normalized copies: callbacks
+            # have no path to rewrite native packet targets.
+            from .session import _trajectory_waypoints
+            _trajectory_waypoints(waypoints, self._joint_counts)
+            context = dict(attempt_id=source_attempt_id, session_id=session_id,
+                episode_id=episode_id, robot_id=self._robot_id,
+                trajectory_id=trajectory_id, first_step_id=first_step_id,
+                cadence_hz=10)
+            observed_at = observation.get('observed_at')
+            if type(observed_at) in (int, float) and math.isfinite(observed_at):
+                context['observed_at'] = observed_at
+            if observation.get('source') in ('hardware', 'simulation'):
+                context['source'] = observation['source']
+            try:
+                decision = decision_callback(deepcopy(waypoints), deepcopy(observation), deepcopy(context))
+            except BaseException:
+                raise RuntimeError('Installed trajectory decision is unavailable; packet refused') from None
+            # A Stop or replacement during a slow callback wins even over allow.
+            if not still_running():
+                return
+            if not isinstance(decision, dict) or decision.get('decision') not in ('allow', 'reject'):
+                raise RuntimeError('Installed trajectory decision is invalid; packet refused')
+            if decision['decision'] != 'allow':
+                raise RuntimeError('Installed trajectory decision refused this packet')
         with self._lock:
             if not still_running():
                 return

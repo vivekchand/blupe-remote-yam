@@ -501,3 +501,29 @@ def test_launcher_uses_existing_fleet_and_keeps_native_control_options(monkeypat
     assert options['local_codex'] and options['local_claude']
     server.return_value.run.assert_called_once()
     config.return_value.bind_socket.return_value.close.assert_called_once()
+
+
+def test_terminal_public_model_uses_source_configuration_after_provider_cleanup(app_factory):
+    app, _, _ = app_factory()
+    owner_browser, viewer_browser = session(app), session(app)
+    owner, viewer = app.visitors.values()
+    owner.controller._status = 'timed_out'
+    owner.controller._provider = None
+    owner.controller._run_configuration = {'provider':'dream', 'model':'dreamlabs/dream-1-beta',
+                                           'system_prompt':'PRIVATE_SOURCE_CONFIGURATION'}
+    owner.controller._run_share_conversation = True
+    owner.runner_session_id = 'fixture-completed-source'
+    owner.runner_task = 'Task whose provider has closed'
+    journal=InteractionLog(owner.directory/('run_'+'c'*32))
+    journal.add('model_progress','Published terminal update',progress_type='summary')
+    owner.controller._interactions=journal
+    # Another visitor's next provider is never this run's identity.
+    viewer.controller._provider=ScriptedAdapter([])
+    code,state,_,_=call(app,'/api/status',session=viewer_browser)
+    assert code==200
+    assert state['public_run']['model_name']=='dreamlabs/dream-1-beta'
+    assert 'PRIVATE_SOURCE_CONFIGURATION' not in json.dumps(state['public_run'])
+    assert owner.controller.status()['provider'] is None
+    assert owner.controller.status()['source_model']=={'provider':'dream','model':'dreamlabs/dream-1-beta'}
+    owner.controller._run_configuration=None
+    assert call(app,'/api/status',session=viewer_browser)[1]['public_run']['model_name']=='Model not recorded'

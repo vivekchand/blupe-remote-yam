@@ -107,6 +107,8 @@
     nodes.cursor.oninput = () => { following = false; selected = Number(nodes.cursor.value); render(); };
     const actions = add(history, 'div', '', 'cm-evidence-actions');
     nodes.follow = add(actions, 'button', 'Follow newest'); nodes.follow.type = 'button'; nodes.follow.onclick = () => { following = true; render(); };
+    nodes.detail = add(actions, 'a', 'Open full trace'); nodes.detail.hidden = true;
+    nodes.detail.target = '_blank'; nodes.detail.rel = 'noopener noreferrer';
     nodes.download = add(actions, 'button', 'Download browser evidence'); nodes.download.type = 'button';
     nodes.download.onclick = () => {
       const exported = store.export(); if (!exported.samples.length) return;
@@ -132,6 +134,9 @@
     const fresh = freshness(following ? latest : view);
     summaryState.dataset.state = disconnected ? 'stale' : fresh.state;
     summaryState.textContent = disconnected ? 'Runner reconnecting' : latest ? (following ? 'Report ' : 'Recorded report ') + ageLabel(fresh.age_s) : 'Waiting for reports';
+    const detailPath = typeof view?.detail_path === 'string' && /^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(view.detail_path) ? view.detail_path : null;
+    nodes.detail.hidden = !detailPath;
+    if (detailPath) nodes.detail.href = detailPath; else nodes.detail.removeAttribute('href');
     if (!root.open && view) return;
     nodes.scope.textContent = !view?.run.present ? 'No task is running. Station feedback can still be reviewed.'
       : view.scope === 'shared_public_run' ? 'Shared run evidence. Station reports are separate from action confirmation.'

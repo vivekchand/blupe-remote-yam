@@ -929,3 +929,108 @@ class DreamClient:
     if not fail:
         assert [r['session_id'] for r in predictions]==[None,'same-model-session','same-model-session',None]
         assert [r['frames'] for r in predictions]==[['1'],['1','2'],['1','2','3'],['4']]
+
+
+def test_trusted_run_context_is_allowlisted_and_each_exchange_has_distinct_identity(tmp_path):
+    source={'attempt_id':'attempt_fixture','session_id':'session_fixture','episode_id':'ep_fixture',
+            'robot_id':'untrusted-override','api_key':'private-not-an-id','prompt':'private-prompt'}
+    provider=adapter(tmp_path, run_context=lambda:source)
+    try:
+        provider.build_trajectory('move', observation(), 0)
+        payload=next(p for command,p in provider._worker.calls if command=='predict')
+        context=payload['observer_context']
+        assert context['attempt_id']=='attempt_fixture' and context['episode_id']=='ep_fixture'
+        assert context['robot_id']=='yam-1' and context['cadence_hz']==10
+        assert context['model']=='dreamlabs/dream-1-beta' and len(context['call_id'])==32
+        assert 'private-' not in json.dumps(context)
+        again=provider._prediction_context(observation(),0)
+        assert again['call_id']!=context['call_id']
+        context['attempt_id']='changed'
+        assert source['attempt_id']=='attempt_fixture'
+        provider.run_context=lambda:(_ for _ in ()).throw(RuntimeError('private-error'))
+        assert 'attempt_id' not in provider._prediction_context(observation(),0)
+    finally: provider.close_transport()
+
+
+def test_actual_nominal_and_motion_limited_evidence_is_detached_and_call_bound(tmp_path, monkeypatch):
+    import remote_yam.dream_policy as policy
+    from copy import deepcopy
+    actual, received={},[]
+    for name in ('action_waypoints','motion_limited_waypoints'):
+        original=getattr(policy,name)
+        def spy(*args,_name=name,_original=original,**kwargs):
+            value=_original(*args,**kwargs)
+            actual[_name]=deepcopy(value)
+            return value
+        monkeypatch.setattr(policy,name,spy)
+    def observe(row):
+        received.append(deepcopy(row))
+        row['waypoints'][0]['left_joints_deg'][0]=99999
+        row['context']['call_id']='changed'
+        return {'replacement':'ignored'}
+    provider=adapter(tmp_path,evidence_observer=observe,run_context=lambda:{'episode_id':'ep_fixture'})
+    try:
+        points=provider.build_trajectory('move',observation(),0)
+        assert [row['layer'] for row in received]==['nominal_waypoints','motion_limited_waypoints']
+        assert received[0]['waypoints']==actual['action_waypoints']
+        assert received[1]['waypoints']==actual['motion_limited_waypoints']==points
+        context=next(p['observer_context'] for command,p in provider._worker.calls if command=='predict')
+        assert all(row['context']==context and row['first_step_id']==0 for row in received)
+        assert context['episode_id']=='ep_fixture' and context['call_id']!='changed'
+        assert points[0]['left_joints_deg'][0]!=99999
+    finally: provider.close_transport()
+
+
+@pytest.mark.parametrize('enabled',[False,True])
+@pytest.mark.parametrize('exception',[RuntimeError,SystemExit,KeyboardInterrupt])
+def test_missing_or_throwing_evidence_callback_keeps_native_calculation(tmp_path,enabled,exception):
+    called=[]
+    def broken(row):
+        called.append(row['layer'])
+        raise exception('private-observer-failure')
+    provider=adapter(tmp_path,evidence_observer=broken if enabled else None)
+    try:
+        points=provider.build_trajectory('move',observation(),0)
+        assert len(points)>=24 and points[0]['step_id']==0
+        assert called==(['nominal_waypoints','motion_limited_waypoints'] if enabled else [])
+    finally: provider.close_transport()
+
+
+@pytest.mark.parametrize('exception',[SystemExit,KeyboardInterrupt])
+def test_run_context_base_exception_does_not_cancel_native_prediction(tmp_path,exception):
+    def broken(): raise exception('private-context-text')
+    provider=adapter(tmp_path,run_context=broken)
+    try:
+        points=provider.build_trajectory('move',observation(),0)
+        assert points and points[0]['step_id']==0
+    finally: provider.close_transport()
+
+
+def test_selected_camera_clocks_remain_separate_from_state_and_reception(tmp_path):
+    provider=adapter(tmp_path)
+    original=Cameras().capture_for_policy(observation())
+    now=time.time()
+    frames=[CameraFrame(frame.name,frame.jpeg,now-index*.1,
+        source_captured_at=now-1-index*.1 if index!=1 else None) for index,frame in enumerate(original)]
+    provider.camera_source.capture_for_policy=lambda *args,**kwargs:frames
+    tick=provider._capture_tick()
+    from remote_yam.dream_policy import CAMERAS
+    assert set(tick['frame_sources'])==set(tick['frames'])
+    for frame in frames:
+        source=tick['frame_sources']['video.'+CAMERAS[frame.name]]
+        assert source=={'source_captured_at_s':frame.source_captured_at,'received_at_s':frame.received_at}
+        assert source['received_at_s']!=tick['observed_at']
+    tick['frame_sources']['video.overhead']['received_at_s']=0
+    assert frames[2].received_at!=0
+
+
+def test_prediction_span_uses_actual_worker_call_identity(tmp_path):
+    events=[]
+    provider=adapter(tmp_path)
+    provider.interaction_sink=lambda kind,message,**details:events.append((kind,details))
+    try:
+        provider.build_trajectory('move',observation(),0)
+        context=next(payload['observer_context'] for command,payload in provider._worker.calls if command=='predict')
+        spans=[details for kind,details in events if kind=='policy_timing' and details.get('stage')=='worker_predict']
+        assert spans and all(row['call_id']==context['call_id'] for row in spans)
+    finally:provider.close_transport()

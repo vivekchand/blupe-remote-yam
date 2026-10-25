@@ -10,8 +10,9 @@ import selectors
 import subprocess
 import threading
 import time
+import uuid
 
-from .session import MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
+from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
 from .latency_spans import journal_span
 
 MODELS = {'dream': ('dreamlabs/dream-1-beta', 'Dream-1 beta'),
@@ -34,13 +35,13 @@ class DreamObservationError(ValueError):
         self.field, self.retryable = field, retryable
 
 
-def motion_limited_waypoints(points, observation, max_step_deg):
+def motion_limited_waypoints(points, observation, max_step_deg, *, max_commands=MAX_COMMANDS):
     """Retain every paired target; add 100 ms steps instead of clipping the path."""
     state_input(observation, '')
     previous = [*observation['left_joints_deg'], observation['left_gripper'],
                 *observation['right_joints_deg'], observation['right_gripper']]
     first_step_id = points[0]['step_id']
-    capacity = min(MAX_WAYPOINTS_PER_PACKET, MAX_COMMANDS - first_step_id)
+    capacity = min(MAX_WAYPOINTS_PER_PACKET, max_commands - first_step_id)
     result = []
     for point in points:
         target = [*point['left_joints_deg'], point['left_gripper'],
@@ -81,7 +82,7 @@ def state_input(observation, prompt):
     return result
 
 
-def action_waypoints(action, first_step_id):
+def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS):
     """20 Hz endpoint sampling at 10 Hz preserves the predicted duration."""
     chunks = [action.get(key) for key in ('q_l_chunk', 'q_r_chunk')]
     if (any(not isinstance(rows, list) or not rows or len(rows) % 2 for rows in chunks)
@@ -89,7 +90,7 @@ def action_waypoints(action, first_step_id):
         raise ValueError('Dream returned mismatched or incomplete joint chunks')
     count = len(chunks[0]) // 2
     if (type(first_step_id) is not int or first_step_id < 0 or count > MAX_WAYPOINTS_PER_PACKET
-            or first_step_id + count > MAX_COMMANDS):
+            or first_step_id + count > max_commands):
         raise ValueError('Dream chunk exceeds the session waypoint budget')
     for rows in chunks:
         if any(not isinstance(row, list) or len(row) != 7
@@ -107,10 +108,15 @@ def action_waypoints(action, first_step_id):
 
 
 class DreamWorker:
-    def __init__(self, python, credentials, directory):
+    def __init__(self, python, credentials, directory, *, observer_module=None, observer_context_path=None):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        env = {k: v for k, v in os.environ.items() if not k.startswith('DREAM_')}
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith('DREAM_') and not k.startswith('YAM_WORKER_OBSERVER_')}
+        for name, path in (('YAM_WORKER_OBSERVER_MODULE', observer_module),
+                           ('YAM_WORKER_OBSERVER_CONTEXT', observer_context_path)):
+            if path is not None:
+                env[name] = str(Path(path).expanduser().resolve())
         env.update(DREAM_CREDENTIALS=str(Path(credentials).expanduser().resolve()),
                    DREAM_WORK_DIR=str(directory.resolve()), DREAM_LOG='off',
                    PYTHONUNBUFFERED='1')
@@ -173,14 +179,17 @@ class DreamAdapter:
 
     def __init__(self, *, provider, model, credentials, python, directory,
                  camera_source, observation_source, robot_id, worker_factory=DreamWorker,
-                 gateway_max_step_deg=None, worker_pool=None):
+                 gateway_max_step_deg=None, worker_pool=None, run_context=None, evidence_observer=None):
         if provider not in MODELS or model != MODELS[provider][0]:
             raise ValueError('Unknown Dream checkpoint')
         self.provider_name, self.model = provider, model
+        self._max_commands = MAX_COMMANDS
         self.credentials, self.python, self.directory = credentials, python, directory
         self.camera_source, self.observation_source, self.robot_id = camera_source, observation_source, robot_id
         self.worker_factory = worker_factory
         self.worker_pool = worker_pool
+        self.run_context = run_context
+        self.evidence_observer = evidence_observer
         self._worker_slot = False
         self._transport_lock = threading.RLock()
         self.gateway_max_step_deg = gateway_max_step_deg
@@ -214,6 +223,9 @@ class DreamAdapter:
     def _interaction(self, kind, message, **details):
         if self.interaction_sink:
             self.interaction_sink(kind, message, **details)
+
+    def configure_run_duration(self, seconds):
+        self._max_commands = command_budget(self.provider_name, seconds)
 
     def public_config(self):
         return dict(provider=self.provider_name, model=self.model, cadence_hz=10,
@@ -403,6 +415,7 @@ class DreamAdapter:
         encoding_began = time.perf_counter()
         from PIL import Image
         encoded = {}
+        frame_sources = {}
         for frame in frames:
             output = io.BytesIO()
             try:
@@ -411,8 +424,14 @@ class DreamAdapter:
             except Exception as error:
                 raise DreamObservationError('Dream ' + frame.name + ' camera image decoding failed ('
                     + type(error).__name__ + ')', field='camera_' + frame.name) from None
-            encoded['video.' + CAMERAS[frame.name]] = base64.b64encode(output.getvalue()).decode()
+            model_camera = 'video.' + CAMERAS[frame.name]
+            encoded[model_camera] = base64.b64encode(output.getvalue()).decode()
+            frame_sources[model_camera] = {
+                'source_captured_at_s': frame.source_captured_at,
+                'received_at_s': frame.received_at,
+            }
         return dict(timestamp=time.monotonic(), observed_at=observed_at, frames=encoded, observation=state,
+                    frame_sources=frame_sources,
                     capture_timing=dict(capture_id=capture_id, started_at=capture_started_at,
                         duration_s=time.perf_counter()-capture_started, state_read_s=state_read_s,
                         camera_capture_s=camera_capture_s, encoding_s=time.perf_counter()-encoding_began))
@@ -515,6 +534,39 @@ class DreamAdapter:
                                       state='failed', attempt=1, first_step_id=first_step_id)
             raise
 
+    def _observe_evidence(self, layer, waypoints, context):
+        if self.evidence_observer is None:
+            return
+        try:
+            # Optional service capture gets actual calculated values, never a
+            # mutable reference into the native plan or a public event payload.
+            detached = json.loads(json.dumps(dict(layer=layer, waypoints=waypoints,
+                first_step_id=context['first_step_id'], context=context), allow_nan=False))
+            self.evidence_observer(detached)
+        except BaseException:
+            pass  # Observation is optional; it cannot enforce or rewrite motion.
+
+    def _prediction_context(self, observation, first_step_id):
+        context = {}
+        if callable(self.run_context):
+            try:
+                supplied = self.run_context()
+                if isinstance(supplied, dict):
+                    for key in ('attempt_id', 'session_id', 'episode_id', 'robot_id'):
+                        value = supplied.get(key)
+                        if isinstance(value, str) and 0 < len(value) <= 160:
+                            context[key] = value
+            except BaseException:
+                pass
+        context.update(call_id=uuid.uuid4().hex, first_step_id=first_step_id,
+                       robot_id=self.robot_id, model=self.model, cadence_hz=10)
+        stamp = observation.get('observed_at')
+        if type(stamp) in (int, float) and math.isfinite(stamp):
+            context['observed_at'] = stamp
+        if observation.get('source') in ('hardware', 'simulation'):
+            context['source'] = observation['source']
+        return context
+
     def build_trajectory(self, prompt, observation, first_step_id):
         if self._cancelled():
             raise RuntimeError('Dream cancelled')
@@ -579,10 +631,13 @@ class DreamAdapter:
                         stage='selected_observation_capture', state='completed', **capture_timing)
                 except Exception:
                     pass
+            prediction_context = self._prediction_context(observation, first_step_id)
             try:
-                with journal_span(self.interaction_sink, 'worker_predict', first_step_id=first_step_id):
+                with journal_span(self.interaction_sink, 'worker_predict', first_step_id=first_step_id,
+                                  call_id=prediction_context['call_id']):
                     reply = self._worker.call('predict', ticks=ticks, commanded=self._commanded,
                                               first_step_id=first_step_id,
+                                              observer_context=prediction_context,
                                               cancelled=self._cancelled)
             except DreamWorkerUnavailable as error:
                 observed_after = self._recover_worker(first_step_id, error.reason)
@@ -612,12 +667,14 @@ class DreamAdapter:
                     began = time.monotonic()
                     continue
                 result = reply['result']
-                nominal = action_waypoints(result['action'], first_step_id)
+                nominal = action_waypoints(result['action'], first_step_id, max_commands=self._max_commands)
+                self._observe_evidence('nominal_waypoints', nominal, prediction_context)
                 measured = latest['observation']
                 baseline = {side+'_joints_deg': [math.degrees(value) for value in measured['state.'+side+'_arm']]
                             for side in ('left', 'right')}
                 baseline.update({side+'_gripper': measured['state.'+side+'_gripper'][0] for side in ('left','right')})
-                points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg)
+                points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands)
+                self._observe_evidence('motion_limited_waypoints', points, prediction_context)
                 self._pending_commanded = {
                     key: [math.radians(value) for value in points[-1][side + '_joints_deg']]
                          + [points[-1][side + '_gripper']]

@@ -211,6 +211,7 @@ class Element {
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(node => node.textContent).join(' '); }
   setAttribute(key, value) { this[key] = value; }
+  removeAttribute(key) { delete this[key]; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
   insertAdjacentElement(position, node) { assert.equal(position, 'afterend'); node.parent = this.parent; this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); }
   querySelectorAll(selector) { const out = []; for (const child of this.children) { if (child.tagName === selector) out.push(child); out.push(...child.querySelectorAll(selector)); } return out; }
@@ -264,4 +265,32 @@ test('widget shows closed journal and independent station versus session report 
   assert.ok(root.textContent.includes('Latest session feedback.'));
   const cursor = dom.getElementById('cmEvidenceCursor'); cursor.value = '0'; cursor.oninput();
   assert.ok(root.textContent.includes('Recorded station report.'));
+});
+
+test('server trace link requires exact same-origin path and displayed source identity', () => {
+  const raw = state(), path = '/clawmetry/trace/' + 'a'.repeat(32);
+  raw.telemetry.detail = {path, attempt_id:'attempt_1'};
+  assert.equal(project(raw).detail_path, path);
+  raw.telemetry.public_run_shared = false;
+  assert.equal(project(raw).detail_path, path); // Owner link does not publish text.
+  assert.equal(project(raw).events.length, 0);
+  for (const bad of ['https://attacker.example'+path, '//attacker.example'+path, path+'?token=secret', path+'#secret', path+'/', '/clawmetry/trace/'+'A'.repeat(32), 'javascript:alert(1)']) {
+    raw.telemetry.detail.path=bad; assert.equal(project(raw).detail_path,null);
+  }
+  raw.telemetry.detail.path=path; raw.telemetry.detail.attempt_id='foreign';
+  assert.equal(project(raw).detail_path,null);
+  delete raw.telemetry.detail; assert.equal(project(raw).detail_path,null);
+});
+
+
+test('full trace opens safely in a new tab and clears on run reset without fetching', () => {
+  const {dom,window,network}=browserHarness();
+  const raw=state(), path='/clawmetry/trace/'+'a'.repeat(32);
+  raw.telemetry.detail={path,attempt_id:'attempt_1'};
+  window.yamTelemetry.observe(project(raw));
+  const link=dom.body.querySelectorAll('a').find(node=>node.textContent==='Open full trace');
+  assert.equal(link.href,path); assert.equal(link.hidden,false);
+  assert.equal(link.target,'_blank'); assert.equal(link.rel,'noopener noreferrer');
+  window.yamTelemetry.reset();
+  assert.equal(link.hidden,true); assert.equal(link.href,undefined); assert.equal(network(),0);
 });
