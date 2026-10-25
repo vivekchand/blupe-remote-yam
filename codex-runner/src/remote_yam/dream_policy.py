@@ -633,7 +633,8 @@ class DreamAdapter:
                     pass
             prediction_context = self._prediction_context(observation, first_step_id)
             try:
-                with journal_span(self.interaction_sink, 'worker_predict', first_step_id=first_step_id):
+                with journal_span(self.interaction_sink, 'worker_predict', first_step_id=first_step_id,
+                                  call_id=prediction_context['call_id']):
                     reply = self._worker.call('predict', ticks=ticks, commanded=self._commanded,
                                               first_step_id=first_step_id,
                                               observer_context=prediction_context,

@@ -1022,3 +1022,15 @@ def test_selected_camera_clocks_remain_separate_from_state_and_reception(tmp_pat
         assert source['received_at_s']!=tick['observed_at']
     tick['frame_sources']['video.overhead']['received_at_s']=0
     assert frames[2].received_at!=0
+
+
+def test_prediction_span_uses_actual_worker_call_identity(tmp_path):
+    events=[]
+    provider=adapter(tmp_path)
+    provider.interaction_sink=lambda kind,message,**details:events.append((kind,details))
+    try:
+        provider.build_trajectory('move',observation(),0)
+        context=next(payload['observer_context'] for command,payload in provider._worker.calls if command=='predict')
+        spans=[details for kind,details in events if kind=='policy_timing' and details.get('stage')=='worker_predict']
+        assert spans and all(row['call_id']==context['call_id'] for row in spans)
+    finally:provider.close_transport()
