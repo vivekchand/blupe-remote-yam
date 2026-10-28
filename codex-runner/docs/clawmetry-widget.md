@@ -8,6 +8,46 @@ Use the playground's own paper, ink, line and Manrope/system typography. One com
 
 The palette inherits `--paper`, `--ink`, `--muted` and `--line`; restrained blue identifies ClawMetry, blue/amber identify the left/right arm readings. There is no decorative animation or replacement dashboard. This deliberately follows the actual robot console rather than introducing a separate marketing surface.
 
+## Move log tab
+
+A fifth conversation mode, `clawmetry`, shows the station's move log: packets,
+waypoints, gateway receipts, stage timings and measured arm feedback, newest
+last. The button and its panel are created at runtime by `clawmetry-widget.js`
+and appended to upstream's own `.conversationModes` strip and beside
+`#liveConversationPanel`. Neither `hosted.html` nor `hosted.js` is edited, so an
+upstream merge cannot conflict with the tab. Because the button carries
+`data-conversation-mode`, upstream's generic handler wires it like the rest; the
+panel settles its own visibility on upstream's `yam:conversation-mode` event,
+which that handler dispatches last. The widget's own click handler performs the
+whole switch too, so the tab works whether or not upstream wired it.
+
+**Motion is not behind the conversation sharing consent.** `public_run_shared`
+still gates task text, model labels, published notes and tool requests. Motion is
+a separate, narrower channel published for every run on the station, because it
+carries no text from the run: `remote_yam.public_motion` emits only an event id,
+a timestamp, the journal kind, bounded tokens such as a gateway code, counts,
+durations, waypoint vectors and measured joint angles. Conversation kinds
+(`model_request`, `model_response`, `model_progress`, `steering_*`) and wire
+kinds (`http_exchange`, `http_connect`) are absent from `MOTION_KINDS` and cannot
+enter. `telemetry-status.js` re-applies the same allowlist, so a new server field
+reaches the page only if both lists are edited. Every sentence in the tab is
+written in the browser from the kind and its numbers; no journal `message`
+string is published.
+
+A 10 Hz `packet_progress` stream folds to one advancing row per trajectory, in
+place, so a move reads as a live counter rather than hundreds of rows. The server
+publishes at most 200 rows projected from the last 600 journal events, cached on
+the journal's own monotonic sequence so an idle journal is not re-projected for
+every visitor's poll. The browser accumulates up to 500 rows per run so a long
+run's early moves survive the server window sliding past them. Measured payload
+for a realistic twelve-packet run: 73 rows, 17KB per poll; the full 200-row
+window is 50KB. Nothing here adds a request, poll, socket or camera.
+
+The station's own journal is the only source. When the published run belongs to
+another host, or the journal cannot be read, the tab names that gap
+(`remote_host`, `unavailable`) instead of rendering an empty log, because an
+empty move log reads as a robot that never moved.
+
 ## Application contract
 
 Inject `telemetry-status.js`, `clawmetry-widget.css` and `clawmetry-widget.js` through the existing `application-head` slot. Scripts must load before the deferred `hosted.js`.
@@ -24,7 +64,7 @@ The panel keeps at most 80 changed snapshots and 96 deduplicated public events i
 
 ## Verification
 
-`node --test codex-runner/tests/test_clawmetry_widget.cjs` covers projection allowlists, source clocks, sharing defaults, independent IDs, scope matching, bounds/deduplication, history reset, observer error containment and zero-network rendering. The complete upstream Python and Node suites remain required. Real fork-browser acceptance and recorder-to-DuckDB evidence are separate checks, and must precede an upstream PR.
+`node --test codex-runner/tests/test_clawmetry_widget.cjs` and `pytest codex-runner/tests/test_public_motion.py` cover projection allowlists, source clocks, sharing defaults, independent IDs, scope matching, bounds/deduplication, history reset, observer error containment and zero-network rendering. The motion checks additionally cover the conversation/wire exclusions, the numeric field bounds, publication without the sharing consent, the per-trajectory fold, the window cap, the named journal gaps and the tab's own visibility against upstream's handler. The complete upstream Python and Node suites remain required. Real fork-browser acceptance and recorder-to-DuckDB evidence are separate checks, and must precede an upstream PR.
 
 ## Existing hosted products
 

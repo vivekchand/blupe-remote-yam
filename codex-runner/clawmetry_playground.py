@@ -10,8 +10,11 @@ from pathlib import Path
 
 from local_playground import LocalPlayground
 from playground import HostedRunner
+from remote_yam.public_motion import project_motion
 
 log = logging.getLogger(__name__)
+# Enough raw journal to fill the projected window after per-trajectory folding.
+MOTION_SOURCE_EVENTS = 600
 STATIC = Path(__file__).resolve().parent / 'static'
 ASSETS = {
     '/static/telemetry-status.js': ('telemetry-status.js', 'text/javascript; charset=utf-8'),
@@ -33,6 +36,8 @@ def _secrets(visitor):
 
 class ClawMetryMixin:
     """Compose with an existing hosted product without replacing its hooks."""
+
+    _motion_cache = None
 
     def telemetry_secrets(self, visitor):
         """Supply known in-memory secrets to the optional private recorder."""
@@ -83,13 +88,37 @@ class ClawMetryMixin:
             visitor.close = close
         return capability, visitor
 
+    def _motion_timeline(self, run_id, owner):
+        """Project the owning journal's motion rows, cached on its sequence.
+
+        Every visitor polls once a second, so this must not re-project an
+        unchanged journal. The log's own monotonic sequence is the cache key.
+        """
+        journal = getattr(owner.controller, '_interactions', None) if owner is not None else None
+        if journal is None:
+            return None
+        try:
+            with journal.lock:
+                sequence = journal.sequence
+                cached = self._motion_cache
+                if cached is not None and cached[0] == run_id and cached[1] == sequence:
+                    return cached[2]
+                events = journal.events[-MOTION_SOURCE_EVENTS:]
+        except Exception:
+            # A journal that cannot be read is reported as unavailable, never
+            # as an empty timeline: a false empty reads as "the robot was idle".
+            return None
+        rows = project_motion(events)
+        self._motion_cache = (run_id, sequence, rows)
+        return rows
+
     async def status_extension(self, visitor, state):
         run = state.get('public_run')
         shared = False
+        local_owner = None
         if isinstance(run, dict) and run.get('run_id'):
             # Locally hosted runs have recording identities. Public API runs
             # instead use episode identities; do not conflate the two.
-            local_owner = None
             for candidate in tuple(self.visitors.values()):
                 recording = getattr(candidate.controller, '_interactions', None)
                 directory = getattr(recording, 'directory', None)
@@ -108,6 +137,19 @@ class ClawMetryMixin:
         inherited = await super().status_extension(visitor, state)
         metadata = dict(inherited) if isinstance(inherited, dict) else {}
         metadata.update(state='observing', public_run_shared=shared)
+        # Motion is published for every run on this station, independently of
+        # the conversation sharing consent above: what the arms were asked to
+        # do and what they reported is numeric and carries no task text.
+        if isinstance(run, dict) and run.get('run_id'):
+            if local_owner is None:
+                # The station is replaying another host's run. We hold no
+                # journal for it; say so rather than render an empty timeline.
+                metadata['motion'] = {'run_id': run['run_id'], 'source': 'remote_host', 'rows': []}
+            else:
+                rows = self._motion_timeline(run['run_id'], local_owner)
+                metadata['motion'] = ({'run_id': run['run_id'], 'source': 'unavailable', 'rows': []}
+                                      if rows is None else
+                                      {'run_id': run['run_id'], 'source': 'station_journal', 'rows': rows})
         attachment = getattr(visitor, '_clawmetry_attachment', None)
         if attachment is not None:
             try:

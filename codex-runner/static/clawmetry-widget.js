@@ -5,9 +5,35 @@
     const ids = view.identity || {};
     return JSON.stringify([view.robot_id, view.scope, ids.attempt_id, ids.public_run_id, ids.episode_id]);
   }
+  // One advancing row per trajectory; every other row is distinct by journal id.
+  const ADVANCING = new Set(['packet_progress']);
+  const motionKey = row => ADVANCING.has(row.kind) ? row.kind + ':' + (row.trajectory_id || '') : row.kind + ':' + row.id;
+
   function createStore() {
     let key = null, samples = [], events = new Map(), signature = null, latest = null;
+    let motion = new Map(), motionRun = null, motionSource = null;
     return {
+      // The server window slides; the browser keeps the whole run's timeline so
+      // a long run's early moves stay readable after they leave that window.
+      updateMotion(view) {
+        const next = view && view.motion;
+        if (!next) return false;
+        if (motionRun !== next.run_id) { motion.clear(); motionRun = next.run_id; }
+        const before = motion.size, source = motionSource;
+        motionSource = next.source;
+        let changed = source !== motionSource;
+        for (const row of next.rows) {
+          const rowKey = motionKey(row), previous = motion.get(rowKey);
+          if (previous && previous.id === row.id && previous.t === row.t) continue;
+          motion.set(rowKey, row);
+          changed = true;
+        }
+        while (motion.size > 500) motion.delete(motion.keys().next().value);
+        return changed || motion.size !== before;
+      },
+      get motion() { return [...motion.values()]; },
+      get motionSource() { return motionSource; },
+      get motionRun() { return motionRun; },
       update(view) {
         if (!view || view.schema !== 'yam.telemetry.v1') return false;
         const next = identity(view);
@@ -29,12 +55,13 @@
         if (samples.length > 80) samples.shift();
         return true;
       },
-      clear() { key = signature = latest = null; samples = []; events.clear(); },
+      clear() { key = signature = latest = null; samples = []; events.clear(); motion.clear(); motionRun = motionSource = null; },
       get samples() { return samples.slice(); },
       get latest() { return latest; },
       export() { return {schema: 'yam.telemetry.browser.v1', exported_at_s: Date.now() / 1000,
         coverage: 'This browser window only. A recording receipt does not confirm durable daemon ingestion.',
-        events: [...events.values()], samples: samples.slice()}; },
+        events: [...events.values()], motion: [...motion.values()], motion_source: motionSource,
+        samples: samples.slice()}; },
     };
   }
   function freshness(view, now = Date.now() / 1000) {
@@ -61,7 +88,68 @@
     if (Number.isSafeInteger(receipt.progress_count) && Number.isSafeInteger(receipt.waypoint_count)) parts.push(receipt.progress_count + ' of ' + receipt.waypoint_count + ' waypoints reported');
     return parts.join('. ') || 'Execution receipt not supplied.';
   }
-  const api = {createStore, freshness, requestedAction, receiptText, identity};
+  // Rows carry no text from the run, so every sentence is written here from the
+  // journal kind and its numbers. An unknown kind never reaches this map.
+  const seconds = value => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + 's' : null;
+  const counted = (value, fallback) => Number.isSafeInteger(value) ? value : fallback;
+  const MOTION_TEXT = {
+    packet_ready: row => 'Prepared ' + counted(row.waypoint_count, 'the') + ' waypoints at ' + counted(row.cadence_hz, 10) + ' Hz',
+    packet_submit: row => 'Sent ' + counted(row.waypoint_count, 'the') + ' waypoints to the gateway',
+    packet_dispatched: row => 'Gateway accepted the packet for dispatch',
+    packet_accepted: row => 'Safety checks passed; executing the packet',
+    packet_progress: row => 'Executing waypoint ' + counted(row.progress_count, '?') + ' of ' + counted(row.waypoint_count, '?'),
+    packet_completed: row => 'Completed ' + counted(row.waypoint_count, 'the') + ' waypoints; arms settled',
+    packet_error: row => 'Packet ' + (row.status || 'failed') + (row.code ? ' · ' + row.code : '') +
+      (Number.isSafeInteger(row.reported_progress) ? ' after ' + row.reported_progress + ' waypoints' : ''),
+    execution_timing: row => 'Robot execution took ' + (seconds(row.elapsed_s) || 'an unreported time'),
+    step_timing: row => 'Step ' + counted(row.step, '?') + ' took ' + (seconds(row.total_s) || 'an unreported time'),
+    observation: row => 'Measured arm feedback received',
+    tool_result: row => Number.isSafeInteger(row.steps) ? 'Completed ' + row.steps + ' waypoints; feedback ready for the next call'
+      : 'Policy outcome: ' + (row.status || 'reported'),
+    tool_error: row => 'No motion sent' + (row.code ? ' · ' + row.code : ''),
+    policy_timing: row => 'Policy stage ' + (row.stage || 'unnamed') + ' ' + (row.state || 'reported') +
+      (seconds(row.duration_s) ? ' · ' + seconds(row.duration_s) : ''),
+    model_timing: row => 'Model stage ' + (row.stage || 'unnamed') + ' ' + (row.state || 'reported') +
+      (seconds(row.duration_s) ? ' · ' + seconds(row.duration_s) : ''),
+    ik_replay: row => 'Inverse kinematics replayed for the packet',
+    observation_refreshed: row => 'Observation feed refreshed',
+    observation_retry: row => 'Observation feed retrying',
+    observation_failure: row => 'Observation feed unavailable',
+    observation_recovered: row => 'Observation feed recovered',
+    worker_recovery: row => 'Worker recovery ' + (row.state || 'reported') + '; motion is paused',
+    stop_requested: row => 'Stop requested',
+    stopped: row => 'Session stopped',
+    policy_complete: row => 'Policy reported the goal reached',
+    home_scene: row => 'Home scene ' + (row.state || 'reported'),
+    feedback_check: row => 'Hardware feedback check ' + (row.status || 'reported'),
+    feedback_timeout: row => 'Station status fetch exceeded the feedback deadline',
+    reconnecting: row => 'Reconnecting to the same session',
+  };
+  function motionText(row) {
+    const build = MOTION_TEXT[row.kind];
+    try { return build ? build(row) : null; } catch (_) { return null; }
+  }
+  const degrees = values => values.map(value => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(1) + '°' : '—').join(' ');
+  function motionNumbers(row) {
+    const parts = [];
+    for (const arm of ['left', 'right']) {
+      const joints = row[arm + '_joints_deg'] || (row.feedback || {})[arm + '_joints_deg'];
+      if (Array.isArray(joints) && joints.length) parts.push((arm === 'left' ? 'L ' : 'R ') + degrees(joints));
+      const gripper = row[arm + '_gripper'] ?? (row.feedback || {})[arm + '_gripper'];
+      if (typeof gripper === 'number' && Number.isFinite(gripper)) parts.push((arm === 'left' ? 'L' : 'R') + ' grip ' + (gripper * 100).toFixed(0) + '%');
+    }
+    for (const name of ['first', 'last']) {
+      if (Array.isArray(row[name]) && row[name].length) parts.push(name + ' ' + degrees(row[name]));
+    }
+    return parts.join(' · ');
+  }
+  const MOTION_SOURCE_TEXT = {
+    station_journal: 'Live from this station’s run journal. Every packet, waypoint and measured report on this station, whether or not its conversation is shared.',
+    remote_host: 'This run is executing on another host. Its move journal is not readable from this station, so no timeline is shown rather than an empty one.',
+    unavailable: 'The station run journal could not be read for this run. This is a gap in the log, not an idle robot.',
+  };
+
+  const api = {createStore, freshness, requestedAction, receiptText, identity, motionText, motionNumbers, motionKey};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof window !== 'undefined') window.ClawmetryWidget = api;
   if (typeof document === 'undefined') return;
@@ -183,9 +271,103 @@
     nodes.follow.disabled = following || !samples.length; nodes.download.disabled = !samples.length;
     nodes.history.textContent = samples.length ? (following ? 'Newest received evidence. ' : 'History paused. ') + samples.length + ' changed snapshots retained, up to 80. Download covers this browser window only.' : 'No browser evidence received yet.';
   }
+  // --- Move log tab -------------------------------------------------------
+  // The tab strip, its panels and hosted.js are upstream's. We add one button
+  // and one panel at runtime and never edit either file, so an upstream merge
+  // cannot conflict with this. Our own click handler does the whole job, and
+  // the upstream `yam:conversation-mode` event is used only to fix up after
+  // upstream's generic handler has also run for our button.
+  const MODE = 'clawmetry';
+  let tab, tabButton, tabNodes;
+
+  function setPressed(active) {
+    for (const button of document.querySelectorAll('[data-conversation-mode]')) {
+      button.setAttribute('aria-pressed', String(button === active));
+    }
+  }
+  function showMotion(show) {
+    if (tab) tab.hidden = !show;
+    const conversation = document.getElementById('liveConversationPanel');
+    const visitors = document.getElementById('visitorChatPanel');
+    if (show) {
+      if (conversation) conversation.hidden = true;
+      if (visitors) visitors.hidden = true;
+      const layout = (conversation || tab)?.closest('.watchLayout');
+      if (layout) layout.classList.remove('conversationClosed');
+      renderMotion();
+    }
+  }
+  function buildTab() {
+    if (tab || document.getElementById('clawmetryMotionPanel')) return;
+    const strip = document.querySelector('.conversationModes');
+    const conversation = document.getElementById('liveConversationPanel');
+    if (!strip || !conversation) return;
+    tabButton = document.createElement('button');
+    tabButton.type = 'button';
+    tabButton.dataset.conversationMode = MODE;
+    tabButton.id = 'clawmetryMotionTab';
+    tabButton.textContent = 'ClawMetry';
+    tabButton.setAttribute('aria-pressed', 'false');
+    tabButton.setAttribute('aria-controls', 'clawmetryMotionPanel');
+    strip.append(tabButton);
+    tabButton.addEventListener('click', () => { setPressed(tabButton); showMotion(true); });
+
+    tab = document.createElement('section');
+    tab.id = 'clawmetryMotionPanel';
+    tab.className = 'panel cm-motion-panel';
+    tab.hidden = true;
+    tab.tabIndex = -1;
+    tab.setAttribute('aria-label', 'ClawMetry move log');
+    const header = add(tab, 'div', '', 'statusHeader');
+    add(header, 'h2', 'ClawMetry · Move log');
+    tabNodes = {state: add(header, 'span', 'Waiting for a run', 'tag')};
+    tabNodes.scope = add(tab, 'p', '', 'help');
+    tabNodes.list = add(tab, 'ol', '', 'cm-motion-list');
+    tabNodes.list.tabIndex = 0;
+    tabNodes.list.setAttribute('aria-label', 'Robot move log');
+    tabNodes.list.setAttribute('aria-live', 'polite');
+    tabNodes.list.setAttribute('aria-relevant', 'additions');
+    tabNodes.empty = add(tab, 'p', '', 'help');
+    add(tab, 'p', 'Packets, waypoints and measured reports from the station’s own run journal. ' +
+      'Model notes and prompts are not shown here and keep their separate sharing choice. ' +
+      'A reported waypoint is what the gateway said; it does not by itself confirm the arm moved.', 'cm-evidence-limits');
+    conversation.insertAdjacentElement('afterend', tab);
+
+    // Upstream's handler also fires for our button and would re-show its own
+    // panel; it dispatches this event last, so we settle the state here.
+    document.addEventListener('yam:conversation-mode', event => {
+      const mode = event.detail && event.detail.mode;
+      if (mode === MODE) showMotion(true); else showMotion(false);
+    });
+  }
+  function renderMotion() {
+    if (!tab || tab.hidden) return;
+    const rows = store.motion, source = store.motionSource;
+    tabNodes.scope.textContent = MOTION_SOURCE_TEXT[source] ||
+      'No run is published on this station yet. The move log fills as soon as one starts.';
+    tabNodes.state.textContent = !source ? 'Waiting for a run'
+      : source === 'station_journal' ? rows.length + ' entries' : 'Not available here';
+    tabNodes.empty.textContent = rows.length ? ''
+      : source === 'station_journal' ? 'No moves recorded for this run yet.' : '';
+    tabNodes.empty.hidden = !tabNodes.empty.textContent;
+    const follow = tabNodes.list.scrollHeight - tabNodes.list.scrollTop - tabNodes.list.clientHeight < 80;
+    tabNodes.list.replaceChildren(...rows.map(row => {
+      const item = document.createElement('li');
+      item.dataset.kind = row.kind;
+      const time = document.createElement('time');
+      time.textContent = new Date(row.t * 1000).toLocaleTimeString();
+      item.append(time);
+      add(item, 'span', motionText(row) || row.kind.replaceAll('_', ' '), 'cm-motion-text');
+      const numbers = motionNumbers(row);
+      if (numbers) add(item, 'span', numbers, 'cm-motion-numbers');
+      return item;
+    }));
+    if (follow) tabNodes.list.scrollTop = tabNodes.list.scrollHeight;
+  }
+
   const observer = {
-    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); if (before !== identity(view)) following = true; disconnected = false; build(); render(); },
-    reset() { store.clear(); following = true; disconnected = false; render(); },
+    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; build(); buildTab(); render(); if (moved) renderMotion(); },
+    reset() { store.clear(); following = true; disconnected = false; render(); renderMotion(); },
     connection(view) { if (!store.latest || store.latest.robot_id === view.robot_id) { disconnected = true; render(); } },
   };
   window.yamTelemetry = observer;
@@ -196,5 +378,6 @@
   window.addEventListener('pageshow', startClock);
   window.addEventListener('pagehide', () => { clearInterval(clock); clock = null; });
   startClock();
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build, {once: true}); else build();
+  const start = () => { build(); buildTab(); };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true}); else start();
 })();

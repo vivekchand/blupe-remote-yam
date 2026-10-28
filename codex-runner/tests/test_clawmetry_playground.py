@@ -527,3 +527,97 @@ def test_terminal_public_model_uses_source_configuration_after_provider_cleanup(
     assert owner.controller.status()['source_model']=={'provider':'dream','model':'dreamlabs/dream-1-beta'}
     owner.controller._run_configuration=None
     assert call(app,'/api/status',session=viewer_browser)[1]['public_run']['model_name']=='Model not recorded'
+
+
+def motion_owner(app):
+    """Give the station's visitor a journal with one complete packet lifecycle."""
+    visitor = next(iter(app.visitors.values()))
+    visitor.controller._interactions = InteractionLog(visitor.directory / ('run_' + 'd' * 32))
+    journal = visitor.controller._interactions
+    journal.add('run_configuration', 'PRIVATE_CONFIGURATION', configuration={'task': 'PRIVATE_TASK'})
+    journal.add('model_response', 'move_to: {"note":"PRIVATE_NOTE"}')
+    journal.add('packet_submit', 'Sending 3 waypoints to AWS', trajectory_id='t1',
+                cadence_hz=10, waypoint_count=3, waypoints=[[1, 2], [3, 4], [5, 6]])
+    journal.add('packet_progress', 'Executing waypoint 1/3', trajectory_id='t1',
+                step_id=1, progress_count=1, waypoint_count=3)
+    journal.add('packet_progress', 'Executing waypoint 2/3', trajectory_id='t1',
+                step_id=2, progress_count=2, waypoint_count=3)
+    journal.add('observation', 'Measured arm feedback received', step_id=2,
+                left_joints_deg=[1, 2, 3, 4, 5, 6], right_joints_deg=[6, 5, 4, 3, 2, 1],
+                left_gripper=0.5, right_gripper=0.25)
+    return visitor, journal.directory.name
+
+
+def test_station_motion_publishes_without_the_conversation_sharing_consent(app_factory):
+    """Moves are numeric and publish for every station run; notes do not."""
+    app, _, _ = app_factory()
+    session(app)
+    owner, identity = motion_owner(app)
+    owner.controller._share_conversation = False
+    state = {'public_run': {'run_id': identity, 'episode_id': 'ep_distinct'}}
+    metadata = asyncio.run(app.status_extension(owner, state))
+    assert metadata['public_run_shared'] is False
+    motion = metadata['motion']
+    assert motion['run_id'] == identity
+    assert motion['source'] == 'station_journal'
+    assert [row['kind'] for row in motion['rows']] == [
+        'packet_submit', 'packet_progress', 'observation']
+    assert motion['rows'][1]['progress_count'] == 2
+    assert motion['rows'][2]['left_joints_deg'] == [1, 2, 3, 4, 5, 6]
+    assert 'PRIVATE_' not in json.dumps(motion)
+
+
+def test_motion_for_another_host_is_named_rather_than_shown_empty(app_factory):
+    app, _, _ = app_factory()
+    session(app)
+    visitor = next(iter(app.visitors.values()))
+    visitor.controller._interactions = InteractionLog(visitor.directory / ('run_' + 'e' * 32))
+    state = {'public_run': {'run_id': 'ep_from_another_station'}}
+    metadata = asyncio.run(app.status_extension(visitor, state))
+    assert metadata['motion'] == {'run_id': 'ep_from_another_station',
+                                  'source': 'remote_host', 'rows': []}
+
+
+def test_unreadable_journal_reports_a_gap_instead_of_an_idle_robot(app_factory):
+    app, _, _ = app_factory()
+    session(app)
+    owner, identity = motion_owner(app)
+
+    class Unreadable:
+        directory = owner.controller._interactions.directory
+
+        @property
+        def lock(self):
+            raise RuntimeError('journal is unavailable')
+
+    owner.controller._interactions = Unreadable()
+    metadata = asyncio.run(app.status_extension(owner, {'public_run': {'run_id': identity}}))
+    assert metadata['motion'] == {'run_id': identity, 'source': 'unavailable', 'rows': []}
+
+
+def test_idle_station_publishes_no_motion_key(app_factory):
+    app, _, _ = app_factory()
+    session(app)
+    visitor = next(iter(app.visitors.values()))
+    assert 'motion' not in asyncio.run(app.status_extension(visitor, {'public_run': None}))
+
+
+def test_unchanged_journal_is_not_reprojected_for_every_poll(app_factory, monkeypatch):
+    """Every visitor polls once a second; an idle journal must stay cheap."""
+    app, _, _ = app_factory()
+    session(app)
+    owner, identity = motion_owner(app)
+    calls = []
+    original = clawmetry_playground.project_motion
+    monkeypatch.setattr(clawmetry_playground, 'project_motion',
+                        lambda events, **kwargs: calls.append(len(events)) or original(events, **kwargs))
+    state = {'public_run': {'run_id': identity}}
+    first = asyncio.run(app.status_extension(owner, state))
+    repeat = asyncio.run(app.status_extension(owner, state))
+    assert len(calls) == 1
+    assert repeat['motion'] == first['motion']
+    owner.controller._interactions.add('packet_completed', 'Completed 3 waypoints; arms settled',
+                                       trajectory_id='t1', waypoint_count=3)
+    after = asyncio.run(app.status_extension(owner, state))
+    assert len(calls) == 2
+    assert after['motion']['rows'][-1]['kind'] == 'packet_completed'

@@ -86,6 +86,60 @@
       ready: typeof safety.ok === 'boolean' ? safety.ok : null, settled: typeof source.settled === 'boolean' ? source.settled : null,
       step_id: count(source.step_id), arms};
   }
+  // Motion rows are numbers, bounded tokens and timestamps. The server already
+  // applies this allowlist; re-applying it here means a future server field
+  // cannot reach the page without someone editing this line too.
+  const MOTION_KINDS = ['packet_ready', 'packet_submit', 'packet_dispatched', 'packet_accepted',
+    'packet_progress', 'packet_completed', 'packet_error', 'execution_timing', 'step_timing',
+    'observation', 'tool_result', 'tool_error', 'policy_timing', 'model_timing', 'ik_replay',
+    'observation_refreshed', 'observation_retry', 'observation_failure', 'observation_recovered',
+    'worker_recovery', 'stop_requested', 'stopped', 'policy_complete', 'home_scene',
+    'feedback_check', 'feedback_timeout', 'reconnecting'];
+  const MOTION_COUNTS = ['step_id', 'progress_count', 'waypoint_count', 'cadence_hz', 'steps', 'reported_progress', 'step'];
+  const MOTION_DURATIONS = ['elapsed_s', 'duration_s', 'total_s', 'started_at'];
+  const MOTION_TOKENS = ['stage', 'state', 'status', 'code', 'progress_type', 'reason_code'];
+  const MOTION_SOURCES = ['station_journal', 'remote_host', 'unavailable'];
+
+  function vector(value, maximum) {
+    if (!Array.isArray(value)) return null;
+    const numbers = value.slice(0, maximum).map(item => finite(item) ? item : null);
+    return numbers.length ? numbers : null;
+  }
+  function armValues(source, row) {
+    for (const arm of ['left', 'right']) {
+      const joints = vector(source[arm + '_joints_deg'], 6);
+      if (joints && joints.some(finite)) row[arm + '_joints_deg'] = joints;
+      const gripper = source[arm + '_gripper'];
+      if (finite(gripper)) row[arm + '_gripper'] = gripper;
+    }
+  }
+  function motionRow(raw) {
+    const source = object(raw);
+    if (!MOTION_KINDS.includes(source.kind)) return null;
+    if (!Number.isSafeInteger(source.id) || source.id < 0) return null;
+    if (!finite(source.t) || source.t <= 0) return null;
+    const row = {id: source.id, t: source.t, kind: source.kind};
+    if (id(source.trajectory_id)) row.trajectory_id = source.trajectory_id;
+    for (const name of MOTION_COUNTS) { const value = count(source[name]); if (value !== null) row[name] = value; }
+    for (const name of MOTION_DURATIONS) if (finite(source[name])) row[name] = source[name];
+    for (const name of MOTION_TOKENS) { const value = id(source[name]); if (value) row[name] = value; }
+    for (const name of ['first', 'last']) {
+      const points = vector(source[name], 16);
+      if (points && points.every(finite)) row[name] = points;
+    }
+    armValues(source, row);
+    const feedback = object(source.feedback), measured = {};
+    armValues(feedback, measured);
+    if (Object.keys(measured).length) row.feedback = measured;
+    return row;
+  }
+  function motion(metadata) {
+    const source = object(metadata.motion);
+    if (!id(source.run_id) || !MOTION_SOURCES.includes(source.source)) return null;
+    const rows = Array.isArray(source.rows) ? source.rows.slice(-200).map(motionRow).filter(Boolean) : [];
+    return {run_id: source.run_id, source: source.source, rows};
+  }
+
   function detailPath(metadata, displayed) {
     const detail = object(metadata.detail);
     if (typeof detail.path !== 'string' || !/^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(detail.path)) return null;
@@ -120,6 +174,9 @@
       run: {present: !!(id(displayed.attempt_id) || id(displayed.run_id) || id(displayed.episode_id)),
         task: text(run.task), model: text(run.model_name, 120), status: phase.includes(run.status) ? run.status : null},
       events: shared ? events(run.events) : [],
+      // Motion is published for every run on the station, so it is not behind
+      // `shared`. It carries no task text, note, prompt or tool argument.
+      motion: motion(metadata),
       receipt: matchesOwn ? {scope: 'matching_owned_run', trajectory_id: id(trajectory.trajectory_id),
         state: receiptStates.includes(trajectory.state) ? trajectory.state : null,
         waypoint_count: count(trajectory.waypoint_count), progress_count: count(trajectory.progress_count),
@@ -129,9 +186,10 @@
       recording: {state: ['waiting', 'recording', 'closed', 'incomplete', 'disabled', 'unavailable', 'not_configured'].includes(recording.state) ? recording.state : 'unconfirmed',
         trace_id: id(recording.trace_id), persistence: 'unconfirmed'},
       coverage: {private_reasoning: false, physical_motion_confirmed: false, physical_stop_confirmed: false,
+        motion_scope: 'Every run on this station, independently of its conversation sharing choice.',
         capture: 'Published run output and received reports only. Independent camera and robot clocks.'}});
   }
-  const api = {project, toolCalls, measurement, text, detailPath};
+  const api = {project, toolCalls, measurement, text, detailPath, motion, motionRow};
   if (typeof window !== 'undefined') window.YamTelemetryStatus = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
