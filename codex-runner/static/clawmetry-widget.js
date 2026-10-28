@@ -160,15 +160,14 @@
     const node = document.createElement(tag); if (content) node.textContent = content;
     if (className) node.className = className; parent.append(node); return node;
   };
-  function build() {
+  // Run evidence is a section of the ClawMetry tab, not a second panel. Two
+  // ClawMetry surfaces on one screen is one too many; see buildTab below.
+  function build(parent) {
     if (root || document.getElementById('clawmetryEvidence')) return;
-    // The camera/chat grid has a viewport-sized height. A disclosure inside it
-    // would grow over run history instead of increasing the document's height.
-    const anchor = document.querySelector('.watchLayout') || document.querySelector('.runnerContent');
-    if (!anchor) return;
+    if (!parent) return;
     root = document.createElement('details'); root.id = 'clawmetryEvidence'; root.className = 'cm-evidence-widget';
     const summary = add(root, 'summary');
-    add(summary, 'strong', 'ClawMetry'); add(summary, 'span', 'Run evidence', 'cm-evidence-title');
+    add(summary, 'strong', 'Run evidence', 'cm-evidence-title');
     summaryState = add(summary, 'span', 'Waiting for reports', 'cm-evidence-status');
     summaryState.setAttribute('role', 'status'); summaryState.setAttribute('aria-live', 'polite');
     const content = add(root, 'div', '', 'cm-evidence-content');
@@ -209,7 +208,7 @@
     const correlation = add(content, 'details', '', 'cm-evidence-identities'); add(correlation, 'summary', 'Evidence identifiers');
     nodes.identities = add(correlation, 'dl');
     add(content, 'p', 'Published notes are not private model reasoning. Requests and packet receipts do not confirm physical movement or stopping. Reports and cameras have independent clocks.', 'cm-evidence-limits');
-    if (anchor.classList.contains('watchLayout')) anchor.insertAdjacentElement('afterend', root); else anchor.append(root);
+    parent.append(root);
     root.addEventListener('toggle', render); render();
   }
   function ageLabel(value) { return value === null ? 'Source time unknown' : value < 60 ? value + 's ago' : Math.floor(value / 60) + 'm ago'; }
@@ -321,6 +320,15 @@
     const header = add(tab, 'div', '', 'statusHeader');
     add(header, 'h2', 'ClawMetry · Move log');
     tabNodes = {state: add(header, 'span', 'Waiting for a run', 'tag')};
+    // A control that cannot work must say why rather than quietly do nothing,
+    // so the link only appears once the server supplies a detail path for the
+    // displayed run, and the note beside it explains the usual reason it has not.
+    tabNodes.detail = add(header, 'a', 'Open detailed view ↗', 'cm-motion-detail');
+    tabNodes.detail.target = '_blank';
+    tabNodes.detail.rel = 'noopener noreferrer';
+    tabNodes.detail.hidden = true;
+    tabNodes.detailNote = add(header, 'span', '', 'cm-motion-detail-note');
+    tabNodes.detailNote.hidden = true;
     tabNodes.scope = add(tab, 'p', '', 'help');
     tabNodes.list = add(tab, 'ol', '', 'cm-motion-list');
     tabNodes.list.tabIndex = 0;
@@ -331,6 +339,8 @@
     add(tab, 'p', 'Packets, waypoints and measured reports from the station’s own run journal. ' +
       'Model notes and prompts are not shown here and keep their separate sharing choice. ' +
       'A reported waypoint is what the gateway said; it does not by itself confirm the arm moved.', 'cm-evidence-limits');
+    // The published-run evidence lives here as a section, not as a second panel.
+    build(tab);
     conversation.insertAdjacentElement('afterend', tab);
 
     // Upstream's handler also fires for our button and would re-show its own
@@ -340,7 +350,20 @@
       if (mode === MODE) showMotion(true); else showMotion(false);
     });
   }
+  function renderDetailLink() {
+    if (!tabNodes) return;
+    const view = store.latest;
+    const path = typeof view?.detail_path === 'string' && /^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(view.detail_path) ? view.detail_path : null;
+    tabNodes.detail.hidden = !path;
+    tabNodes.detailNote.hidden = !!path;
+    if (path) { tabNodes.detail.href = path; tabNodes.detailNote.textContent = ''; }
+    else {
+      tabNodes.detail.removeAttribute('href');
+      tabNodes.detailNote.textContent = 'Detailed view available to the browser that launched the run, when detailed capture was chosen for it.';
+    }
+  }
   function renderMotion() {
+    renderDetailLink();
     if (!tab || tab.hidden) return;
     const rows = store.motion, source = store.motionSource;
     tabNodes.scope.textContent = MOTION_SOURCE_TEXT[source] ||
@@ -366,7 +389,7 @@
   }
 
   const observer = {
-    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; build(); buildTab(); render(); if (moved) renderMotion(); },
+    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; buildTab(); render(); if (moved) renderMotion(); else renderDetailLink(); },
     reset() { store.clear(); following = true; disconnected = false; render(); renderMotion(); },
     connection(view) { if (!store.latest || store.latest.robot_id === view.robot_id) { disconnected = true; render(); } },
   };
@@ -378,6 +401,6 @@
   window.addEventListener('pageshow', startClock);
   window.addEventListener('pagehide', () => { clearInterval(clock); clock = null; });
   startClock();
-  const start = () => { build(); buildTab(); };
+  const start = () => { buildTab(); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true}); else start();
 })();

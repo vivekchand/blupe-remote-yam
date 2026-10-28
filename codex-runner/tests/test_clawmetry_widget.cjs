@@ -263,10 +263,11 @@ test('embedded widget uses text nodes, does not fetch and leaves upstream camera
   assert.ok(root.textContent.includes('<script>bad()</script>'));
   assert.equal(root.querySelectorAll('img').length, 0); assert.equal(root.querySelectorAll('script').length, 0);
   assert.equal(network(), 0);
-  // The expanding panel must take normal page space outside the fixed camera/chat grid.
-  assert.equal(dom.body.children.length, 3); assert.equal(dom.body.children[0], dom.watch);
-  assert.equal(dom.body.children[1], root); assert.equal(dom.body.children[2], dom.history);
-  assert.equal(descendants(dom.watch).includes(root), false);
+  // One ClawMetry surface, not two: evidence is a section of the move-log tab.
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  assert.ok(descendants(panel).includes(root));
+  assert.equal(dom.body.children.length, 2);
+  assert.equal(dom.body.children[0], dom.watch); assert.equal(dom.body.children[1], dom.history);
   assert.equal(dom.watch.children.includes(dom.footer), true);
   window.yamTelemetry.reset(); assert.ok(root.textContent.includes('No shared task supplied.'));
   assert.ok(root.textContent.includes('No task is running.'));
@@ -448,4 +449,44 @@ test('an unreadable journal says so in the tab instead of showing an empty log',
   assert.equal(panel.textContent.includes('No moves recorded'), false);
   window.yamTelemetry.observe(project(motionState([], 'unavailable')));
   assert.ok(panel.textContent.includes('gap in the log, not an idle robot'));
+});
+
+test('exactly one ClawMetry surface: evidence sits inside the tab, not beside it', () => {
+  const {dom, window} = browserHarness();
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  const evidence = dom.getElementById('clawmetryEvidence');
+  assert.ok(evidence);
+  // The old standalone disclosure beside the camera/chat grid must not come back.
+  assert.ok(descendants(panel).includes(evidence));
+  assert.equal(descendants(dom.watch).filter(n => n.id === 'clawmetryEvidence').length, 1);
+  assert.equal(dom.body.children.filter(n => n.id === 'clawmetryEvidence').length, 0);
+});
+
+test('detailed view link appears only for a server-supplied same-origin trace path', () => {
+  const {dom, window} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab');
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  button.listeners.click();
+  const link = dom.getElementById('clawmetryMotionPanel').children
+    .find(n => n.className === 'statusHeader').children.find(n => n.tagName === 'a');
+  assert.equal(link.hidden, true);
+  assert.equal(link.href, undefined);
+  // Absent metadata explains itself rather than offering a control that does nothing.
+  assert.ok(dom.getElementById('clawmetryMotionPanel').textContent.includes('Detailed view available to the browser that launched the run'));
+
+  const raw = motionState(MOVES);
+  raw.telemetry.detail = {path: '/clawmetry/trace/' + 'a'.repeat(32), attempt_id: 'attempt_1'};
+  window.yamTelemetry.observe(project(raw));
+  assert.equal(link.hidden, false);
+  assert.equal(link.href, '/clawmetry/trace/' + 'a'.repeat(32));
+  assert.equal(link.target, '_blank');
+  assert.equal(link.rel, 'noopener noreferrer');
+
+  for (const bad of ['https://evil.example/clawmetry/trace/' + 'a'.repeat(32), '/clawmetry/trace/zz', '/clawmetry/trace/' + 'a'.repeat(32) + '?x=1']) {
+    const other = motionState(MOVES);
+    other.telemetry.detail = {path: bad, attempt_id: 'attempt_1'};
+    window.yamTelemetry.observe(project(other));
+    assert.equal(link.hidden, true, bad);
+  }
 });
