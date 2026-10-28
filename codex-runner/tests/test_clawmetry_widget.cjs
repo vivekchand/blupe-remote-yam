@@ -205,7 +205,10 @@ test('existing render/poll owns delivery and stale robot responses never notify'
 
 class Element {
   constructor(tag, doc) { this.tagName = tag; this.doc = doc; this.children = []; this.dataset = {}; this.listeners = {}; this._text = ''; this.open = false;
-    this.classList = {contains: value => (this.className || '').split(' ').includes(value)}; }
+    const names = () => (this.className || '').split(' ').filter(Boolean);
+    this.classList = {contains: value => names().includes(value),
+      add: value => { if (!names().includes(value)) this.className = [...names(), value].join(' '); },
+      remove: value => { this.className = names().filter(name => name !== value).join(' '); }}; }
   append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
   replaceChildren(...nodes) { this.children = []; this._text = ''; this.append(...nodes); }
   set textContent(value) { this._text = String(value); this.children = []; }
@@ -215,17 +218,33 @@ class Element {
   addEventListener(name, fn) { this.listeners[name] = fn; }
   insertAdjacentElement(position, node) { assert.equal(position, 'afterend'); node.parent = this.parent; this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); }
   querySelectorAll(selector) { const out = []; for (const child of this.children) { if (child.tagName === selector) out.push(child); out.push(...child.querySelectorAll(selector)); } return out; }
+  matches(selector) { return selector.startsWith('.') ? this.classList.contains(selector.slice(1)) : this.tagName === selector; }
+  closest(selector) { let node = this; while (node) { if (node.matches && node.matches(selector)) return node; node = node.parent; } return null; }
 }
+function descendants(node) { const out = []; for (const child of node.children) { out.push(child, ...descendants(child)); } return out; }
 function browserHarness() {
   const dom = {hidden: false, readyState: 'complete', listeners: {},
     createElement(tag) { return new Element(tag, this); },
     addEventListener(name, fn) { this.listeners[name] = fn; },
     getElementById(id) { return [this.body, ...this.body.querySelectorAll('*')].find(node => node.id === id) || find(this.body, node => node.id === id); },
-    querySelector(selector) { return selector === '.watchLayout' ? this.watch : selector === '.cameraFooter' ? this.footer : selector === '.runnerContent' ? this.body : null; }};
+    querySelectorAll(selector) { assert.equal(selector, '[data-conversation-mode]');
+      return descendants(this.body).filter(node => node.dataset && node.dataset.conversationMode); },
+    querySelector(selector) { return selector === '.watchLayout' ? this.watch : selector === '.cameraFooter' ? this.footer
+      : selector === '.conversationModes' ? this.modes : selector === '.runnerContent' ? this.body : null; }};
   function find(node, predicate) { if (predicate(node)) return node; for (const child of node.children) { const found = find(child, predicate); if (found) return found; } return null; }
   dom.body = new Element('div', dom); dom.body.className = 'runnerContent';
   dom.watch = new Element('div', dom); dom.watch.className = 'watchLayout';
   dom.footer = new Element('div', dom); dom.footer.className = 'cameraFooter'; dom.watch.append(dom.footer);
+  // The upstream conversation tab strip and its two panels.
+  dom.modes = new Element('div', dom); dom.modes.className = 'conversationModes';
+  for (const mode of ['reasoning', 'conversation', 'hide', 'visitor']) {
+    const button = new Element('button', dom); button.dataset.conversationMode = mode; dom.modes.append(button);
+  }
+  dom.conversation = new Element('section', dom); dom.conversation.id = 'liveConversationPanel'; dom.conversation.hidden = false;
+  dom.visitors = new Element('aside', dom); dom.visitors.id = 'visitorChatPanel'; dom.visitors.hidden = true;
+  dom.interaction = new Element('div', dom); dom.interaction.className = 'watchInteraction';
+  dom.interaction.append(dom.visitors, dom.conversation);
+  dom.watch.append(dom.modes, dom.interaction);
   dom.history = new Element('section', dom); dom.history.id = 'past-runs'; dom.body.append(dom.watch, dom.history);
   const window = {listeners: {}, addEventListener(name, fn){this.listeners[name]=fn;}};
   let network = 0, intervals = 0;
@@ -247,7 +266,8 @@ test('embedded widget uses text nodes, does not fetch and leaves upstream camera
   // The expanding panel must take normal page space outside the fixed camera/chat grid.
   assert.equal(dom.body.children.length, 3); assert.equal(dom.body.children[0], dom.watch);
   assert.equal(dom.body.children[1], root); assert.equal(dom.body.children[2], dom.history);
-  assert.equal(dom.watch.children.length, 1); assert.equal(dom.watch.children[0], dom.footer);
+  assert.equal(descendants(dom.watch).includes(root), false);
+  assert.equal(dom.watch.children.includes(dom.footer), true);
   window.yamTelemetry.reset(); assert.ok(root.textContent.includes('No shared task supplied.'));
   assert.ok(root.textContent.includes('No task is running.'));
   raw.telemetry.public_run_shared = false; window.yamTelemetry.observe(project(raw));
@@ -293,4 +313,139 @@ test('full trace opens safely in a new tab and clears on run reset without fetch
   assert.equal(link.target,'_blank'); assert.equal(link.rel,'noopener noreferrer');
   window.yamTelemetry.reset();
   assert.equal(link.hidden,true); assert.equal(link.href,undefined); assert.equal(network(),0);
+});
+
+function motionState(rows, source = 'station_journal') {
+  const raw = state();
+  raw.telemetry.motion = {run_id: 'run_recording', source, rows};
+  return raw;
+}
+const MOVES = [
+  {id: 10, t: 200, kind: 'packet_submit', trajectory_id: 'trajectory_1', waypoint_count: 3, cadence_hz: 10},
+  {id: 11, t: 201, kind: 'packet_accepted', trajectory_id: 'trajectory_1'},
+  {id: 12, t: 202, kind: 'packet_progress', trajectory_id: 'trajectory_1', progress_count: 1, waypoint_count: 3},
+  {id: 13, t: 203, kind: 'packet_progress', trajectory_id: 'trajectory_1', progress_count: 2, waypoint_count: 3},
+  {id: 14, t: 204, kind: 'observation', step_id: 4, left_joints_deg: [1, 2, 3, 4, 5, 6], left_gripper: 0.25},
+];
+
+test('motion rows publish numbers and bounded tokens, never run or wire text', () => {
+  const rows = [...MOVES,
+    {id: 20, t: 205, kind: 'model_response', message: 'move_to: {"note":"PRIVATE_NOTE"}'},
+    {id: 21, t: 206, kind: 'http_exchange', body: 'PRIVATE_WIRE'},
+    {id: 22, t: 207, kind: 'packet_error', status: 'rejected', code: 'left_tip_outside_workspace',
+      reported_progress: 2, message: 'PRIVATE_GATEWAY_TEXT', note: 'PRIVATE_NOTE'},
+    {id: 23, t: 208, kind: 'packet_progress', trajectory_id: 'trajectory_1', progress_count: Infinity, waypoint_count: 3}];
+  const view = project(motionState(rows));
+  const packed = JSON.stringify(view.motion);
+  assert.equal(packed.includes('PRIVATE_'), false);
+  assert.equal(packed.includes('move_to'), false);
+  assert.equal(view.motion.rows.some(row => row.kind === 'model_response' || row.kind === 'http_exchange'), false);
+  const error = view.motion.rows.find(row => row.kind === 'packet_error');
+  assert.deepEqual(error, {id: 22, t: 207, kind: 'packet_error', reported_progress: 2,
+    status: 'rejected', code: 'left_tip_outside_workspace'});
+  // A nonfinite count is dropped, never rendered as a zero the robot never reported.
+  const last = view.motion.rows.filter(row => row.kind === 'packet_progress').pop();
+  assert.equal('progress_count' in last, false);
+  assert.deepEqual(view.motion.rows.find(row => row.kind === 'observation').left_joints_deg, [1, 2, 3, 4, 5, 6]);
+});
+
+test('motion is published for every station run, independently of conversation sharing', () => {
+  const raw = motionState(MOVES);
+  raw.telemetry.public_run_shared = false;
+  const view = project(raw);
+  // The conversation stays private; the moves still publish. That is the split.
+  assert.equal(view.scope, 'not_shared');
+  assert.deepEqual(view.events, []);
+  assert.equal(view.run.task, null);
+  assert.equal(view.motion.rows.length, MOVES.length);
+  assert.equal(view.motion.source, 'station_journal');
+});
+
+test('an unreadable or remote journal is reported, never rendered as an idle robot', () => {
+  for (const source of ['remote_host', 'unavailable']) {
+    const view = project(motionState([], source));
+    assert.equal(view.motion.source, source);
+    assert.deepEqual(view.motion.rows, []);
+  }
+  assert.equal(project(motionState(MOVES, 'invented_source')).motion, null);
+  const missing = state(); delete missing.telemetry.motion;
+  assert.equal(project(missing).motion, null);
+});
+
+test('move log tab is added beside the upstream modes without editing its markup', () => {
+  const {dom, window, network} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab');
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  assert.ok(button); assert.ok(panel);
+  // Added to upstream's own strip, so upstream's handler wires it like the rest.
+  assert.equal(button.parent, dom.modes);
+  assert.equal(dom.modes.children.length, 5);
+  assert.equal(button.dataset.conversationMode, 'clawmetry');
+  assert.equal(panel.parent, dom.interaction);
+  assert.equal(dom.interaction.children.indexOf(panel), dom.interaction.children.indexOf(dom.conversation) + 1);
+  assert.equal(panel.hidden, true);
+  assert.equal(network(), 0);
+});
+
+test('choosing the move log shows the station timeline and releases the other panels', () => {
+  const {dom, window, network} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab'), panel = dom.getElementById('clawmetryMotionPanel');
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  button.listeners.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(dom.conversation.hidden, true);
+  assert.equal(dom.visitors.hidden, true);
+  assert.equal(button.ariaPressed ?? button['aria-pressed'], 'true');
+  const text = panel.textContent;
+  assert.ok(text.includes('Sent 3 waypoints to the gateway'));
+  assert.ok(text.includes('Safety checks passed'));
+  assert.ok(text.includes('Measured arm feedback received'));
+  assert.ok(text.includes('L 1.0° 2.0° 3.0° 4.0° 5.0° 6.0°'));
+  assert.ok(text.includes('L grip 25%'));
+  // One advancing row per trajectory: the counter moves, the list does not grow.
+  assert.equal((text.match(/Executing waypoint/g) || []).length, 1);
+  assert.ok(text.includes('Executing waypoint 2 of 3'));
+  assert.equal(network(), 0);
+});
+
+test('a later waypoint advances the same row and a new run clears the log', () => {
+  const {dom, window} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab'), panel = dom.getElementById('clawmetryMotionPanel');
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  button.listeners.click();
+  const advanced = motionState([{id: 30, t: 209, kind: 'packet_progress', trajectory_id: 'trajectory_1',
+    progress_count: 3, waypoint_count: 3}]);
+  window.yamTelemetry.observe(project(advanced));
+  assert.equal((panel.textContent.match(/Executing waypoint/g) || []).length, 1);
+  assert.ok(panel.textContent.includes('Executing waypoint 3 of 3'));
+  // Earlier rows of the same run survive a server window that no longer lists them.
+  assert.ok(panel.textContent.includes('Sent 3 waypoints to the gateway'));
+  const next = motionState(MOVES); next.telemetry.motion.run_id = 'run_other';
+  window.yamTelemetry.observe(project(next));
+  assert.equal((panel.textContent.match(/Sent 3 waypoints/g) || []).length, 1);
+});
+
+test('switching to another mode hides the move log and the strip stays upstream-owned', () => {
+  const {dom, window} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab'), panel = dom.getElementById('clawmetryMotionPanel');
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  button.listeners.click();
+  assert.equal(panel.hidden, false);
+  // Upstream dispatches this last; our button must settle after its handler.
+  dom.listeners['yam:conversation-mode']({detail: {mode: 'clawmetry'}});
+  assert.equal(panel.hidden, false);
+  assert.equal(dom.conversation.hidden, true);
+  dom.listeners['yam:conversation-mode']({detail: {mode: 'reasoning'}});
+  assert.equal(panel.hidden, true);
+});
+
+test('an unreadable journal says so in the tab instead of showing an empty log', () => {
+  const {dom, window} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab'), panel = dom.getElementById('clawmetryMotionPanel');
+  window.yamTelemetry.observe(project(motionState([], 'remote_host')));
+  button.listeners.click();
+  assert.ok(panel.textContent.includes('executing on another host'));
+  assert.equal(panel.textContent.includes('No moves recorded'), false);
+  window.yamTelemetry.observe(project(motionState([], 'unavailable')));
+  assert.ok(panel.textContent.includes('gap in the log, not an idle robot'));
 });
