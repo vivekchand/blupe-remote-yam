@@ -4,3 +4,37 @@
 #clawmetryMotionTab{font-size:inherit}#clawmetryMotionTab[aria-pressed=true]{color:#386388}.cm-motion-panel{color:var(--ink,#18251e);font-size:13px;line-height:1.5;min-height:0;display:flex;flex-direction:column}.cm-motion-panel .statusHeader h2{color:#386388}.cm-motion-panel .help{font-size:11px;color:var(--muted,#626c64);margin:6px 0 10px;max-width:92ch}.cm-motion-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1 1 auto;min-height:120px;max-height:46vh;font-variant-numeric:tabular-nums;border-top:1px solid var(--line,#cecfc4)}.cm-motion-list li{display:grid;grid-template-columns:74px 1fr;gap:2px 10px;padding:6px 2px;border-bottom:1px solid var(--line,#cecfc4);font-size:12px}.cm-motion-list time{color:var(--muted,#626c64);font-size:11px}.cm-motion-text{min-width:0;overflow-wrap:anywhere}.cm-motion-numbers{grid-column:2;color:var(--muted,#626c64);font-size:11px;overflow-wrap:anywhere}.cm-motion-list li[data-kind^=packet_]{border-left:2px solid #50779a;padding-left:8px}.cm-motion-list li[data-kind=packet_progress]{border-left-color:#386388}.cm-motion-list li[data-kind=packet_error],.cm-motion-list li[data-kind=tool_error],.cm-motion-list li[data-kind=feedback_timeout]{border-left:2px solid #9b622d;padding-left:8px}.cm-motion-list li[data-kind=observation]{border-left:2px solid #cecfc4;padding-left:8px}.cm-motion-panel .cm-evidence-limits{margin-top:12px}.cm-motion-panel :focus-visible{outline:2px solid #50779a;outline-offset:3px}@media(max-width:600px){.cm-motion-list li{grid-template-columns:1fr;gap:1px}.cm-motion-numbers{grid-column:1}.cm-motion-list{max-height:52vh}}
 /* Evidence is a section of the move-log tab, not a second panel on the page. */
 .cm-motion-panel .cm-evidence-widget{margin:12px 0 0;border-radius:8px}.cm-motion-panel .cm-evidence-widget>summary{min-height:38px;padding:9px 12px}.cm-motion-panel .cm-evidence-content{padding:3px 12px 12px}.cm-motion-panel .cm-evidence-grid{margin:12px 0}.cm-motion-detail{margin-left:auto;font-size:11px;color:#386388;text-decoration:underline;white-space:nowrap}.cm-motion-detail-note{margin-left:auto;font-size:10px;color:var(--muted,#626c64);max-width:34ch;line-height:1.35;text-align:right}.cm-motion-panel .statusHeader{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+/* ClawMetry's own dark surface inside BluPe's light page. Tokens are the
+   dashboard's dark palette, redeclared locally so nothing outside the panel
+   changes. The scope is one id: no upstream selector is restyled. */
+#clawmetryMotionPanel{--cm-bg:#0b0f14;--cm-surface:#121820;--cm-raised:#151d28;--cm-line:#273243;--cm-line-soft:#1f2937;--cm-ink:#e6edf5;--cm-ink-2:#c1cad6;--cm-muted:#7c8a9d;--cm-accent:#60a5fa;--cm-left:#7dd3fc;--cm-right:#fbbf24;--cm-error:#f87171;background:var(--cm-surface);border:1px solid var(--cm-line);color:var(--cm-ink);border-radius:10px;padding:14px 16px 16px;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+#clawmetryMotionPanel .statusHeader h2{color:var(--cm-ink);font-size:14px;letter-spacing:-.2px}
+#clawmetryMotionPanel .tag{background:var(--cm-raised);border:1px solid var(--cm-line);color:var(--cm-ink-2);border-radius:999px;padding:2px 9px;font-size:11px}
+#clawmetryMotionPanel .help,#clawmetryMotionPanel .cm-evidence-limits,#clawmetryMotionPanel .cm-evidence-intro,#clawmetryMotionPanel .cm-motion-numbers,#clawmetryMotionPanel .cm-motion-detail-note,#clawmetryMotionPanel time{color:var(--cm-muted)}
+#clawmetryMotionPanel .cm-motion-list{border-top:1px solid var(--cm-line);background:var(--cm-bg);border-radius:8px;padding:2px 10px}
+#clawmetryMotionPanel .cm-motion-list li{border-bottom:1px solid var(--cm-line-soft);color:var(--cm-ink-2)}
+#clawmetryMotionPanel .cm-motion-list li:last-child{border-bottom:0}
+#clawmetryMotionPanel .cm-motion-list li[data-kind^=packet_]{border-left:2px solid var(--cm-accent)}
+#clawmetryMotionPanel .cm-motion-list li[data-kind=packet_progress]{border-left-color:var(--cm-left)}
+#clawmetryMotionPanel .cm-motion-list li[data-kind=packet_error],#clawmetryMotionPanel .cm-motion-list li[data-kind=tool_error],#clawmetryMotionPanel .cm-motion-list li[data-kind=feedback_timeout]{border-left:2px solid var(--cm-error)}
+#clawmetryMotionPanel .cm-motion-list li[data-kind=observation]{border-left:2px solid var(--cm-line)}
+#clawmetryMotionPanel .cm-motion-detail{color:var(--cm-accent)}
+#clawmetryMotionPanel .cm-evidence-widget{background:var(--cm-raised);border:1px solid var(--cm-line);color:var(--cm-ink)}
+#clawmetryMotionPanel .cm-evidence-widget>summary{color:var(--cm-ink)}
+#clawmetryMotionPanel .cm-evidence-widget>summary:before,#clawmetryMotionPanel .cm-evidence-status,#clawmetryMotionPanel .cm-evidence-identities>summary,#clawmetryMotionPanel .cm-evidence-identities dt{color:var(--cm-muted)}
+#clawmetryMotionPanel .cm-evidence-content{border-top:1px solid var(--cm-line)}
+#clawmetryMotionPanel .cm-evidence-feedback{border-top:1px solid var(--cm-line)}
+#clawmetryMotionPanel th,#clawmetryMotionPanel td{border-bottom:1px solid var(--cm-line-soft);color:var(--cm-ink-2)}
+#clawmetryMotionPanel td[data-arm=left]{color:var(--cm-left)}
+#clawmetryMotionPanel td[data-arm=right]{color:var(--cm-right)}
+#clawmetryMotionPanel button{background:#1d2632;border:1px solid var(--cm-line);color:var(--cm-ink);border-radius:7px}
+#clawmetryMotionPanel button:hover:not(:disabled){background:#263344}
+#clawmetryMotionPanel button:disabled{opacity:.45}
+#clawmetryMotionPanel input[type=range]{accent-color:var(--cm-accent)}
+#clawmetryMotionPanel :focus-visible{outline:2px solid var(--cm-accent);outline-offset:3px}
+/* Collaboration lockup */
+.cm-brand{display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid var(--cm-line)}
+.cm-brand-mark{height:21px;width:auto;display:block}
+.cm-brand-x{color:var(--cm-muted);font-size:13px;line-height:1}
+.cm-brand-blupe{font-family:Manrope,system-ui,-apple-system,sans-serif;font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--cm-ink);line-height:1}
+@media(max-width:600px){.cm-brand-mark{height:18px}.cm-brand-blupe{font-size:15px}#clawmetryMotionPanel{padding:12px}}

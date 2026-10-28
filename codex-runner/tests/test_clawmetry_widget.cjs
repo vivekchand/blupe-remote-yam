@@ -216,6 +216,7 @@ class Element {
   setAttribute(key, value) { this[key] = value; }
   removeAttribute(key) { delete this[key]; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
+  click() { if (this.listeners.click) this.listeners.click(); }
   insertAdjacentElement(position, node) { assert.equal(position, 'afterend'); node.parent = this.parent; this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); }
   querySelectorAll(selector) { const out = []; for (const child of this.children) { if (child.tagName === selector) out.push(child); out.push(...child.querySelectorAll(selector)); } return out; }
   matches(selector) { return selector.startsWith('.') ? this.classList.contains(selector.slice(1)) : this.tagName === selector; }
@@ -248,10 +249,13 @@ function browserHarness() {
   dom.history = new Element('section', dom); dom.history.id = 'past-runs'; dom.body.append(dom.watch, dom.history);
   const window = {listeners: {}, addEventListener(name, fn){this.listeners[name]=fn;}};
   let network = 0, intervals = 0;
+  const deferred = [];
   const context = vm.createContext({window, document: dom, console, Object, Number, JSON, Map, Date, Blob, URL,
-    fetch(){network++;throw new Error('Widget must not fetch');},setInterval(){intervals++;return intervals;},clearInterval(){},setTimeout(){}});
+    fetch(){network++;throw new Error('Widget must not fetch');},setInterval(){intervals++;return intervals;},clearInterval(){},
+    setTimeout(fn){if(typeof fn==='function')deferred.push(fn);return 0;}});
   vm.runInContext(widgetSource, context);
-  return {dom, window, context, network:()=>network, intervals:()=>intervals};
+  const flush = () => { while (deferred.length) deferred.shift()(); };
+  return {dom, window, context, flush, network:()=>network, intervals:()=>intervals};
 }
 
 test('embedded widget uses text nodes, does not fetch and leaves upstream camera/control nodes intact', () => {
@@ -489,4 +493,39 @@ test('detailed view link appears only for a server-supplied same-origin trace pa
     window.yamTelemetry.observe(project(other));
     assert.equal(link.hidden, true, bad);
   }
+});
+
+test('the move log is the default tab once upstream has wired its strip', () => {
+  const {dom, flush} = browserHarness();
+  const button = dom.getElementById('clawmetryMotionTab');
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  // Not selected during construction: upstream's own deferred script runs after us.
+  assert.equal(panel.hidden, true);
+  flush();
+  assert.equal(panel.hidden, false);
+  assert.equal(button['aria-pressed'], 'true');
+  assert.equal(dom.conversation.hidden, true);
+});
+
+test('a visitor who picks another tab is never overridden by the default', () => {
+  const {dom, flush} = browserHarness();
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  // Upstream dispatches this for a real click on one of its own buttons.
+  dom.listeners['yam:conversation-mode']({detail: {mode: 'reasoning'}});
+  flush();
+  assert.equal(panel.hidden, true);
+  assert.equal(dom.getElementById('clawmetryMotionTab')['aria-pressed'], 'false');
+});
+
+test('the default selection is applied once, not reasserted on every poll', () => {
+  const {dom, window, flush} = browserHarness();
+  const panel = dom.getElementById('clawmetryMotionPanel');
+  flush();
+  assert.equal(panel.hidden, false);
+  dom.listeners['yam:conversation-mode']({detail: {mode: 'hide'}});
+  assert.equal(panel.hidden, true);
+  // Later status polls must not drag the visitor back to our tab.
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  window.yamTelemetry.observe(project(motionState(MOVES)));
+  assert.equal(panel.hidden, true);
 });
