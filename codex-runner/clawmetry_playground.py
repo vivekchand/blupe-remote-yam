@@ -20,8 +20,10 @@ ASSETS = {
     '/static/telemetry-status.js': ('telemetry-status.js', 'text/javascript; charset=utf-8'),
     '/static/clawmetry-widget.js': ('clawmetry-widget.js', 'text/javascript; charset=utf-8'),
     '/static/clawmetry-widget.css': ('clawmetry-widget.css', 'text/css; charset=utf-8'),
+    '/static/clawmetry-logo.svg': ('clawmetry-logo.svg', 'image/svg+xml; charset=utf-8'),
 }
 HEAD = b'''<link rel="stylesheet" href="/static/clawmetry-widget.css">
+  <link rel="preload" href="/static/clawmetry-logo.svg" as="image" type="image/svg+xml">
   <script src="/static/telemetry-status.js" defer></script>
   <script src="/static/clawmetry-widget.js" defer></script>'''
 

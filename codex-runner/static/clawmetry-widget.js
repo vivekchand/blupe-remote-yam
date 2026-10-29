@@ -278,6 +278,16 @@
   // upstream's generic handler has also run for our button.
   const MODE = 'clawmetry';
   let tab, tabButton, tabNodes;
+  // The move log is the default view, selected once upstream has wired its own
+  // strip. `choosing` distinguishes our own programmatic selection from a
+  // visitor's, so a visitor who picks another tab is never overridden.
+  let defaultApplied = false, visitorChose = false, choosing = false;
+  function applyDefaultMode() {
+    if (defaultApplied || visitorChose || !tabButton) return;
+    defaultApplied = true;
+    choosing = true;
+    try { tabButton.click(); } finally { choosing = false; }
+  }
 
   function setPressed(active) {
     for (const button of document.querySelectorAll('[data-conversation-mode]')) {
@@ -317,8 +327,19 @@
     tab.hidden = true;
     tab.tabIndex = -1;
     tab.setAttribute('aria-label', 'ClawMetry move log');
+    // Collaboration lockup: ClawMetry's own mark beside BluPe's wordmark, in
+    // BluPe's own type. Neither brand is redrawn or recoloured.
+    const brand = add(tab, 'div', '', 'cm-brand');
+    brand.setAttribute('role', 'img');
+    brand.setAttribute('aria-label', 'ClawMetry and BluPe');
+    const mark = add(brand, 'img', '', 'cm-brand-mark');
+    mark.src = '/static/clawmetry-logo.svg';
+    mark.alt = '';
+    mark.setAttribute('aria-hidden', 'true');
+    add(brand, 'span', '×', 'cm-brand-x').setAttribute('aria-hidden', 'true');
+    add(brand, 'span', 'BluPe', 'cm-brand-blupe').setAttribute('aria-hidden', 'true');
     const header = add(tab, 'div', '', 'statusHeader');
-    add(header, 'h2', 'ClawMetry · Move log');
+    add(header, 'h2', 'Move log');
     tabNodes = {state: add(header, 'span', 'Waiting for a run', 'tag')};
     // A control that cannot work must say why rather than quietly do nothing,
     // so the link only appears once the server supplies a detail path for the
@@ -347,8 +368,13 @@
     // panel; it dispatches this event last, so we settle the state here.
     document.addEventListener('yam:conversation-mode', event => {
       const mode = event.detail && event.detail.mode;
+      // A selection we did not make is the visitor's; never override it later.
+      if (!choosing) { visitorChose = true; defaultApplied = true; }
       if (mode === MODE) showMotion(true); else showMotion(false);
     });
+    // Upstream wires the strip from its own deferred script, so select the
+    // default after this task rather than during construction.
+    setTimeout(applyDefaultMode, 0);
   }
   function renderDetailLink() {
     if (!tabNodes) return;
@@ -389,7 +415,7 @@
   }
 
   const observer = {
-    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; buildTab(); render(); if (moved) renderMotion(); else renderDetailLink(); },
+    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; buildTab(); applyDefaultMode(); render(); if (moved) renderMotion(); else renderDetailLink(); },
     reset() { store.clear(); following = true; disconnected = false; render(); renderMotion(); },
     connection(view) { if (!store.latest || store.latest.robot_id === view.robot_id) { disconnected = true; render(); } },
   };
