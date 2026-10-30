@@ -380,11 +380,24 @@
     if (!tabNodes) return;
     const view = store.latest;
     const path = typeof view?.detail_path === 'string' && /^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(view.detail_path) ? view.detail_path : null;
-    tabNodes.detail.hidden = !path;
-    tabNodes.detailNote.hidden = !!path;
-    if (path) { tabNodes.detail.href = path; tabNodes.detailNote.textContent = ''; }
-    else {
+    // A finished run's trace is still served, so when nothing is live the
+    // reader's own last run is offered instead -- labelled as the past run it
+    // is, never dressed up as the run the station is showing.
+    const recent = !path && view && view.recent_detail ? view.recent_detail : null;
+    const target = path || (recent ? recent.path : null);
+    tabNodes.detail.hidden = !target;
+    tabNodes.detailNote.hidden = !!target;
+    if (target) {
+      tabNodes.detail.href = target;
+      tabNodes.detail.textContent = path ? 'Open detailed view \u2197' : 'Open your last run \u2197';
+      tabNodes.detail.title = path ? '' :
+        'The run this station is showing now is not yours. This opens the last run you started'
+        + (recent && recent.task ? ': ' + recent.task : '.');
+      tabNodes.detailNote.textContent = '';
+    } else {
       tabNodes.detail.removeAttribute('href');
+      tabNodes.detail.textContent = 'Open detailed view \u2197';
+      tabNodes.detail.title = '';
       tabNodes.detailNote.textContent = 'Detailed view available to the browser that launched the run, when detailed capture was chosen for it.';
     }
   }
