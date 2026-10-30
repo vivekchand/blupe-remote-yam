@@ -148,6 +148,15 @@
       : !!(id(detail.episode_id) && detail.episode_id === id(displayed.episode_id));
     return same ? detail.path : null;
   }
+  // A finished run's trace stays served, but `detail_path` is tied to the run
+  // the station is displaying now, so it goes blank the moment the station is
+  // idle. The server offers the reader's own most recent run separately; it is
+  // kept separate here too, because a past run must never read as the live one.
+  function recentDetail(metadata) {
+    const recent = object(metadata.detail_recent);
+    if (typeof recent.path !== 'string' || !/^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(recent.path)) return null;
+    return {path: recent.path, task: text(recent.task), ended: recent.ended === true};
+  }
   function project(input, options = {}) {
     const state = object(input), metadata = object(state.telemetry), candidate = object(state.public_run);
     const displayed = object(options.displayed_identity);
@@ -168,6 +177,7 @@
       received_at_s: finite(options.received_at_s) ? options.received_at_s : Date.now() / 1000,
       scope: shared ? 'shared_public_run' : 'not_shared',
       detail_path: detailPath(metadata, displayed),
+      recent_detail: recentDetail(metadata),
       identity: {attempt_id: attempt, public_run_id: publicRun, episode_id: episode,
         recording_run_id: shared && matchesOwn ? id(object(state.interactions).run_id) : null,
         session_id: matchesOwn ? id(state.session_id) : null},

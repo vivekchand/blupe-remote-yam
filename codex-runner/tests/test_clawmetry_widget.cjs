@@ -308,6 +308,69 @@ test('server trace link requires exact same-origin path and displayed source ide
 });
 
 
+test('a finished run stays reachable to the reader who started it', () => {
+  const raw = state(), mine = '/clawmetry/trace/' + 'b'.repeat(32);
+  // The station is idle: there is no displayed run, so no live link exists.
+  delete raw.telemetry.detail;
+  raw.telemetry.detail_recent = {path: mine, task: 'Pick up the red block.', ended: true};
+  const view = project(raw);
+  assert.equal(view.detail_path, null, 'an idle station has no live trace to point at');
+  assert.equal(view.recent_detail.path, mine);
+  assert.equal(view.recent_detail.task, 'Pick up the red block.');
+  assert.equal(view.recent_detail.ended, true);
+  // A run the station is still writing must not be reported as finished.
+  raw.telemetry.detail_recent = {path: mine, task: 'Still going.', ended: false};
+  assert.equal(project(raw).recent_detail.ended, false);
+  delete raw.telemetry.detail_recent.ended;
+  assert.equal(project(raw).recent_detail.ended, false, 'an unstated end is not an end');
+  raw.telemetry.detail_recent = {path: mine, task: 'Pick up the red block.', ended: true};
+  // The same path checks as the live link: a past run is not a looser target.
+  for (const bad of ['https://attacker.example' + mine, '//attacker.example' + mine, mine + '?token=secret',
+                     mine + '#secret', mine + '/', '/clawmetry/trace/' + 'B'.repeat(32), 'javascript:alert(1)',
+                     '/clawmetry/trace/' + 'b'.repeat(31)]) {
+    raw.telemetry.detail_recent = {path: bad, ended: true};
+    assert.equal(project(raw).recent_detail, null, bad + ' must not become a link');
+  }
+  raw.telemetry.detail_recent = undefined;
+  assert.equal(project(raw).recent_detail, null);
+});
+
+
+test('the last-run link never impersonates the run on screen, and needs no request', () => {
+  const {dom, window, network} = browserHarness();
+  const live = '/clawmetry/trace/' + 'a'.repeat(32), mine = '/clawmetry/trace/' + 'b'.repeat(32);
+  const raw = motionState(MOVES);
+  raw.telemetry.detail = {path: live, attempt_id: 'attempt_1'};
+  raw.telemetry.detail_recent = {path: mine, task: 'An older task.', ended: true};
+  window.yamTelemetry.observe(project(raw));
+  dom.getElementById('clawmetryMotionTab').listeners.click();
+  const link = dom.getElementById('clawmetryMotionPanel').children
+    .find(n => n.className === 'statusHeader').children.find(n => n.tagName === 'a');
+  assert.equal(link.hidden, false);
+  assert.equal(link.href, live, 'a live run wins over a past one');
+  assert.equal(link.textContent.startsWith('Open detailed view'), true);
+
+  // Station goes idle. The live link is gone; the reader's own run remains.
+  delete raw.telemetry.detail;
+  window.yamTelemetry.observe(project(raw));
+  assert.equal(link.hidden, false, 'an idle station must not strand the reader');
+  assert.equal(link.href, mine);
+  assert.equal(link.textContent.startsWith('Open your last run'), true,
+    'a finished run must be labelled as one, never as the live view');
+  assert.ok(link.title.includes('not yours') && link.title.includes('An older task.'));
+  assert.equal(link.target, '_blank');
+  assert.ok(link.rel.includes('noopener'));
+
+  // A reader who started nothing is told why, and is offered no link.
+  delete raw.telemetry.detail_recent;
+  window.yamTelemetry.observe(project(raw));
+  assert.equal(link.hidden, true);
+  assert.ok(dom.getElementById('clawmetryMotionPanel').textContent.includes('launched the run'));
+  // The widget is fed by the page's own poll; it must still make no request.
+  assert.equal(network.length, 0, 'the widget must stay zero-network');
+});
+
+
 test('full trace opens safely in a new tab and clears on run reset without fetching', () => {
   const {dom,window,network}=browserHarness();
   const raw=state(), path='/clawmetry/trace/'+'a'.repeat(32);
