@@ -44,8 +44,8 @@ class LoggedSessionAPI:
             setattr(self.api, name, value)
 
     def setup(self, payload, paid=False):
-        # Forward only private contact fields, never provider credentials.
-        self.queue_identity = {k: payload[k] for k in ("runner_name", "email") if k in payload}
+        # Forward only contact and model fields, never provider credentials.
+        self.queue_identity = {k: payload[k] for k in ("runner_name", "email", "model") if k in payload}
         if payload.get('email_run_video') is True:
             self.queue_identity['email_run_video'] = True
         self.submission_id = uuid.uuid4().hex
@@ -59,9 +59,11 @@ class LoggedSessionAPI:
         except Exception as exc:
             print('[queue-log-error] '+type(exc).__name__, flush=True)
 
-    def create_session(self, prompt, run_duration_s=300, *, provider=""):
+    def create_session(self, prompt, run_duration_s=300, *, provider="", cadence_hz=10.0):
         self.note('queue_request', {'prompt': prompt, 'run_duration_s': run_duration_s})
         options = dict(self.queue_identity)
+        if cadence_hz != 10:
+            options["cadence_hz"] = cadence_hz
         if provider:
             options['provider'] = provider
         try:

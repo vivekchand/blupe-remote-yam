@@ -6,6 +6,22 @@ const widget = require('../static/clawmetry-widget.js');
 const hosted = fs.readFileSync(path.join(__dirname, '../static/hosted.js'), 'utf8');
 const widgetSource = fs.readFileSync(path.join(__dirname, '../static/clawmetry-widget.js'), 'utf8');
 const notify = hosted.slice(hosted.indexOf('function notifyYamTelemetry('), hosted.indexOf('// Default to Dream'));
+test('typed unsubmitted-plan recovery is meaningful compact progress, never private prose',()=>{
+  const raw={id:1,t:100,kind:'plan_recovery',state:'replanning',reason_code:'pre_dispatch_pose_changed',retry_count:1,retry_limit:2,
+    step_id:8,trajectory_id:'traj_8',dispatched:false,executed_waypoints:0,message:'PRIVATE_MESSAGE',error:'PRIVATE_ERROR',first:['PRIVATE_TARGET'],status:'PRIVATE_STATUS'};
+  const row=projection.motionRow(raw);
+  assert.deepEqual(row,{id:1,t:100,kind:'plan_recovery',state:'replanning',reason_code:'pre_dispatch_pose_changed',retry_count:1,retry_limit:2,
+    step_id:8,trajectory_id:'traj_8',dispatched:false,executed_waypoints:0});
+  assert.equal(widget.meaningfulMotion(row),true);
+  assert.equal(widget.motionText(row),'Plan changed; checking a fresh view (retry 1 of 2)');
+  assert.equal(widget.motionText({...row,state:'exhausted',retry_count:2}),'Replanning limit reached; no new motion sent');
+  assert.equal(JSON.stringify(row).includes('PRIVATE'),false);
+  assert.equal(widget.motionNumbers(row),'');
+  const meta={motion:{source:'station_journal',run_id:'run_1',rows:Array.from({length:250},(_,id)=>({...raw,id}))}};
+  assert.equal(projection.motion(meta).rows.length,200);
+  for(const [key,value]of [['state','PRIVATE'],['reason_code','PRIVATE'],['retry_count',true],['retry_count',-1],['retry_count',3],['retry_limit',3],
+    ['step_id',-1],['trajectory_id','PRIVATE prose'],['dispatched',true],['executed_waypoints',1],['executed_waypoints',false]])assert.equal(projection.motionRow({...raw,[key]:value}),null,key);
+});
 function state() {
   return {telemetry: {public_run_shared: true, recording: {state: 'recording', trace_id: 'trace_1'}},
     attempt_id: 'attempt_1', session_id: 'session_1', episode_id: 'episode_1', packets_submitted: 1,
@@ -205,11 +221,15 @@ test('existing render/poll owns delivery and stale robot responses never notify'
 
 class Element {
   constructor(tag, doc) { this.tagName = tag; this.doc = doc; this.children = []; this.dataset = {}; this.listeners = {}; this._text = ''; this.open = false;
+    this.style = {removeProperty(name){delete this[name];}};
     const names = () => (this.className || '').split(' ').filter(Boolean);
     this.classList = {contains: value => names().includes(value),
       add: value => { if (!names().includes(value)) this.className = [...names(), value].join(' '); },
       remove: value => { this.className = names().filter(name => name !== value).join(' '); }}; }
-  append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+  append(...nodes) { for (const node of nodes) { if(node.parent)node.parent.children.splice(node.parent.children.indexOf(node),1); node.parent = this; this.children.push(node); } }
+  get parentElement(){return this.parent || null;}
+  get nextSibling(){return this.parent?.children[this.parent.children.indexOf(this)+1] || null;}
+  insertBefore(node,before){if(node.parent)node.parent.children.splice(node.parent.children.indexOf(node),1);node.parent=this;this.children.splice(this.children.indexOf(before),0,node);}
   replaceChildren(...nodes) { this.children = []; this._text = ''; this.append(...nodes); }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(node => node.textContent).join(' '); }
@@ -217,6 +237,7 @@ class Element {
   removeAttribute(key) { delete this[key]; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
   click() { if (this.listeners.click) this.listeners.click(); }
+  focus() { this.doc.activeElement = this; }
   insertAdjacentElement(position, node) { assert.equal(position, 'afterend'); node.parent = this.parent; this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node); }
   querySelectorAll(selector) { const out = []; for (const child of this.children) { if (child.tagName === selector) out.push(child); out.push(...child.querySelectorAll(selector)); } return out; }
   matches(selector) { return selector.startsWith('.') ? this.classList.contains(selector.slice(1)) : this.tagName === selector; }
@@ -224,7 +245,8 @@ class Element {
 }
 function descendants(node) { const out = []; for (const child of node.children) { out.push(child, ...descendants(child)); } return out; }
 function browserHarness() {
-  const dom = {hidden: false, readyState: 'complete', listeners: {},
+  const dom = {hidden: false, readyState: 'complete', listeners: {}, events: [],
+    dispatchEvent(event){this.events.push(event);this.listeners[event.type]?.(event);return true;},
     createElement(tag) { return new Element(tag, this); },
     addEventListener(name, fn) { this.listeners[name] = fn; },
     getElementById(id) { return [this.body, ...this.body.querySelectorAll('*')].find(node => node.id === id) || find(this.body, node => node.id === id); },
@@ -244,19 +266,56 @@ function browserHarness() {
   dom.conversation = new Element('section', dom); dom.conversation.id = 'liveConversationPanel'; dom.conversation.hidden = false;
   dom.visitors = new Element('aside', dom); dom.visitors.id = 'visitorChatPanel'; dom.visitors.hidden = true;
   dom.interaction = new Element('div', dom); dom.interaction.className = 'watchInteraction';
+  const close = new Element('button', dom); close.id = 'meetingClosePanel'; dom.interaction.append(close);
   dom.interaction.append(dom.visitors, dom.conversation);
   dom.watch.append(dom.modes, dom.interaction);
   dom.history = new Element('section', dom); dom.history.id = 'past-runs'; dom.body.append(dom.watch, dom.history);
   const window = {listeners: {}, addEventListener(name, fn){this.listeners[name]=fn;}};
   let network = 0, intervals = 0;
   const deferred = [];
-  const context = vm.createContext({window, document: dom, console, Object, Number, JSON, Map, Date, Blob, URL,
+  const context = vm.createContext({window, document: dom, console, Object, Number, JSON, Map, Date, Blob, URL, CustomEvent:class {constructor(type,options={}){this.type=type;this.detail=options.detail;}},
     fetch(){network++;throw new Error('Widget must not fetch');},setInterval(){intervals++;return intervals;},clearInterval(){},
     setTimeout(fn){if(typeof fn==='function')deferred.push(fn);return 0;}});
   vm.runInContext(widgetSource, context);
   const flush = () => { while (deferred.length) deferred.shift()(); };
   return {dom, window, context, flush, network:()=>network, intervals:()=>intervals};
 }
+
+test('review expansion preserves rule draft, scroll and native layout; reduce and Escape restore sizing', () => {
+  const {dom,network} = browserHarness();
+  const panel=dom.getElementById('clawmetryMotionPanel'), expand=dom.getElementById('cm-expand-review');
+  const scroll=dom.getElementById('cm-trust-scroll'), editor=dom.getElementById('cm-guard-editor-slot');
+  const input=dom.createElement('textarea'); input.value="don't pick yellow color"; editor.append(input); scroll.scrollTop=91;
+  dom.getElementById('clawmetryMotionTab').click();
+  const originalParent=panel.parent;
+  expand.click();
+  assert.equal(panel.classList.contains('cm-review-expanded'),true);
+  assert.equal(expand['aria-expanded'],'true'); assert.equal(expand.textContent,'Reduce review');
+  assert.equal(panel.parent,originalParent); assert.equal(input.parent,editor); assert.equal(scroll.scrollTop,91);
+  panel.style.width='600px'; panel.style.height='500px';
+  expand.click();
+  assert.equal(panel.classList.contains('cm-review-expanded'),false);
+  assert.equal(panel.style.width,undefined); assert.equal(panel.style.height,undefined);
+  assert.equal(input.value,"don't pick yellow color"); assert.equal(expand['aria-expanded'],'false');
+  expand.click(); let prevented=0,stopped=0;
+  panel.listeners.keydown({key:'Escape',preventDefault(){prevented++;},stopPropagation(){stopped++;}});
+  assert.equal(prevented,1); assert.equal(stopped,1); assert.equal(dom.activeElement,expand);
+  assert.equal(panel.classList.contains('cm-review-expanded'),false); assert.equal(network(),0);
+});
+
+test('leaving or closing review clears expansion without changing native controls', () => {
+  for(const leave of ['tab','native-close','robot','pagehide']) {
+    const {dom,window}=browserHarness(), panel=dom.getElementById('clawmetryMotionPanel');
+    const button=dom.getElementById('cm-expand-review'); dom.getElementById('clawmetryMotionTab').click(); button.click();
+    panel.style.width='610px';
+    if(leave==='tab') dom.dispatchEvent({type:'yam:conversation-mode',detail:{mode:'reasoning'}});
+    if(leave==='native-close') dom.getElementById('meetingClosePanel').click();
+    if(leave==='robot') window.listeners['blupe-robot-selected']();
+    if(leave==='pagehide') window.listeners.pagehide();
+    assert.equal(panel.classList.contains('cm-review-expanded'),false,leave);
+    assert.equal(button['aria-expanded'],'false',leave); assert.equal(panel.style.width,undefined,leave);
+  }
+});
 
 test('embedded widget uses text nodes, does not fetch and leaves upstream camera/control nodes intact', () => {
   const {dom,window,network} = browserHarness();
@@ -294,7 +353,7 @@ test('widget shows closed journal and independent station versus session report 
 
 test('server trace link requires exact same-origin path and displayed source identity', () => {
   const raw = state(), path = '/clawmetry/trace/' + 'a'.repeat(32);
-  raw.telemetry.detail = {path, attempt_id:'attempt_1'};
+  raw.telemetry.detail = {path, attempt_id:'attempt_1',episode_id:'episode_1'};
   assert.equal(project(raw).detail_path, path);
   raw.telemetry.public_run_shared = false;
   assert.equal(project(raw).detail_path, path); // Owner link does not publish text.
@@ -308,10 +367,73 @@ test('server trace link requires exact same-origin path and displayed source ide
 });
 
 
+test('a finished run stays reachable to the reader who started it', () => {
+  const raw = state(), mine = '/clawmetry/trace/' + 'b'.repeat(32);
+  // The station is idle: there is no displayed run, so no live link exists.
+  delete raw.telemetry.detail;
+  raw.telemetry.detail_recent = {path: mine, task: 'Pick up the red block.', ended: true};
+  const view = project(raw);
+  assert.equal(view.detail_path, null, 'an idle station has no live trace to point at');
+  assert.equal(view.recent_detail.path, mine);
+  assert.equal(view.recent_detail.task, 'Pick up the red block.');
+  assert.equal(view.recent_detail.ended, true);
+  // A run the station is still writing must not be reported as finished.
+  raw.telemetry.detail_recent = {path: mine, task: 'Still going.', ended: false};
+  assert.equal(project(raw).recent_detail.ended, false);
+  delete raw.telemetry.detail_recent.ended;
+  assert.equal(project(raw).recent_detail.ended, false, 'an unstated end is not an end');
+  raw.telemetry.detail_recent = {path: mine, task: 'Pick up the red block.', ended: true};
+  // The same path checks as the live link: a past run is not a looser target.
+  for (const bad of ['https://attacker.example' + mine, '//attacker.example' + mine, mine + '?token=secret',
+                     mine + '#secret', mine + '/', '/clawmetry/trace/' + 'B'.repeat(32), 'javascript:alert(1)',
+                     '/clawmetry/trace/' + 'b'.repeat(31)]) {
+    raw.telemetry.detail_recent = {path: bad, ended: true};
+    assert.equal(project(raw).recent_detail, null, bad + ' must not become a link');
+  }
+  raw.telemetry.detail_recent = undefined;
+  assert.equal(project(raw).recent_detail, null);
+});
+
+
+test('the last-run link never impersonates the run on screen, and needs no request', () => {
+  const {dom, window, network} = browserHarness();
+  const live = '/clawmetry/trace/' + 'a'.repeat(32), mine = '/clawmetry/trace/' + 'b'.repeat(32);
+  const raw = motionState(MOVES);
+  raw.telemetry.detail = {path: live, attempt_id: 'attempt_1',episode_id:'episode_1'};
+  raw.telemetry.detail_recent = {path: mine, task: 'An older task.', ended: true};
+  window.yamTelemetry.observe(project(raw));
+  dom.getElementById('clawmetryMotionTab').listeners.click();
+  const link = dom.getElementById('clawmetryMotionPanel').children
+    .find(n => n.className === 'statusHeader').children.find(n => n.tagName === 'a');
+  assert.equal(link.hidden, false);
+  assert.equal(link.href, live, 'a live run wins over a past one');
+  assert.equal(link.textContent.startsWith('Open live trace'), true);
+
+  // Station goes idle. The live link is gone; the reader's own run remains.
+  delete raw.telemetry.detail;
+  window.yamTelemetry.observe(project(raw));
+  assert.equal(link.hidden, false, 'an idle station must not strand the reader');
+  assert.equal(link.href, mine);
+  assert.equal(link.textContent.startsWith('Last run'), true,
+    'a finished run must be labelled as one, never as the live view');
+  assert.ok(link.title.includes('not yours') && link.title.includes('An older task.'));
+  assert.equal(link.target, '_blank');
+  assert.ok(link.rel.includes('noopener'));
+
+  // A reader who started nothing is told why, and is offered no link.
+  delete raw.telemetry.detail_recent;
+  window.yamTelemetry.observe(project(raw));
+  assert.equal(link.hidden, true);
+  assert.ok(descendants(dom.getElementById('clawmetryMotionPanel')).some(node=>node.className==='cm-sessions-link'&&node.href==='/clawmetry/'));
+  // The widget is fed by the page's own poll; it must still make no request.
+  assert.equal(network.length, 0, 'the widget must stay zero-network');
+});
+
+
 test('full trace opens safely in a new tab and clears on run reset without fetching', () => {
   const {dom,window,network}=browserHarness();
   const raw=state(), path='/clawmetry/trace/'+'a'.repeat(32);
-  raw.telemetry.detail={path,attempt_id:'attempt_1'};
+  raw.telemetry.detail={path,attempt_id:'attempt_1',episode_id:'episode_1'};
   window.yamTelemetry.observe(project(raw));
   const link=dom.body.querySelectorAll('a').find(node=>node.textContent==='Open full trace');
   assert.equal(link.href,path); assert.equal(link.hidden,false);
@@ -403,7 +525,7 @@ test('choosing the move log shows the station timeline and releases the other pa
   assert.equal(button.ariaPressed ?? button['aria-pressed'], 'true');
   const text = panel.textContent;
   assert.ok(text.includes('Sent 3 waypoints to the gateway'));
-  assert.ok(text.includes('Safety checks passed'));
+  assert.ok(text.includes('Gateway reported packet accepted for execution'));
   assert.ok(text.includes('Measured arm feedback received'));
   assert.ok(text.includes('L 1.0° 2.0° 3.0° 4.0° 5.0° 6.0°'));
   assert.ok(text.includes('L grip 25%'));
@@ -427,7 +549,7 @@ test('a later waypoint advances the same row and a new run clears the log', () =
   assert.ok(panel.textContent.includes('Sent 3 waypoints to the gateway'));
   const next = motionState(MOVES); next.telemetry.motion.run_id = 'run_other';
   window.yamTelemetry.observe(project(next));
-  assert.equal((panel.textContent.match(/Sent 3 waypoints/g) || []).length, 1);
+  assert.equal((dom.getElementById('cm-technical-events').textContent.match(/Sent 3 waypoints/g) || []).length, 1);
 });
 
 test('switching to another mode hides the move log and the strip stays upstream-owned', () => {
@@ -449,7 +571,7 @@ test('an unreadable journal says so in the tab instead of showing an empty log',
   const button = dom.getElementById('clawmetryMotionTab'), panel = dom.getElementById('clawmetryMotionPanel');
   window.yamTelemetry.observe(project(motionState([], 'remote_host')));
   button.listeners.click();
-  assert.ok(panel.textContent.includes('executing on another host'));
+  assert.ok(panel.textContent.includes('move journal for the displayed station run is not available'));
   assert.equal(panel.textContent.includes('No moves recorded'), false);
   window.yamTelemetry.observe(project(motionState([], 'unavailable')));
   assert.ok(panel.textContent.includes('gap in the log, not an idle robot'));
@@ -477,10 +599,10 @@ test('detailed view link appears only for a server-supplied same-origin trace pa
   assert.equal(link.hidden, true);
   assert.equal(link.href, undefined);
   // Absent metadata explains itself rather than offering a control that does nothing.
-  assert.ok(dom.getElementById('clawmetryMotionPanel').textContent.includes('Detailed view available to the browser that launched the run'));
+  assert.ok(descendants(dom.getElementById('clawmetryMotionPanel')).some(node=>node.className==='cm-sessions-link'&&node.href==='/clawmetry/'));
 
   const raw = motionState(MOVES);
-  raw.telemetry.detail = {path: '/clawmetry/trace/' + 'a'.repeat(32), attempt_id: 'attempt_1'};
+  raw.telemetry.detail = {path: '/clawmetry/trace/' + 'a'.repeat(32), attempt_id: 'attempt_1',episode_id:'episode_1'};
   window.yamTelemetry.observe(project(raw));
   assert.equal(link.hidden, false);
   assert.equal(link.href, '/clawmetry/trace/' + 'a'.repeat(32));
@@ -489,43 +611,438 @@ test('detailed view link appears only for a server-supplied same-origin trace pa
 
   for (const bad of ['https://evil.example/clawmetry/trace/' + 'a'.repeat(32), '/clawmetry/trace/zz', '/clawmetry/trace/' + 'a'.repeat(32) + '?x=1']) {
     const other = motionState(MOVES);
-    other.telemetry.detail = {path: bad, attempt_id: 'attempt_1'};
+    other.telemetry.detail = {path: bad, attempt_id: 'attempt_1',episode_id:'episode_1'};
     window.yamTelemetry.observe(project(other));
     assert.equal(link.hidden, true, bad);
   }
 });
 
-test('the move log is the default tab once upstream has wired its strip', () => {
-  const {dom, flush} = browserHarness();
+test('the optional move log preserves the upstream initial tab', () => {
+  const {dom, window, flush} = browserHarness();
   const button = dom.getElementById('clawmetryMotionTab');
   const panel = dom.getElementById('clawmetryMotionPanel');
-  // Not selected during construction: upstream's own deferred script runs after us.
   assert.equal(panel.hidden, true);
   flush();
-  assert.equal(panel.hidden, false);
-  assert.equal(button['aria-pressed'], 'true');
-  assert.equal(dom.conversation.hidden, true);
-});
-
-test('a visitor who picks another tab is never overridden by the default', () => {
-  const {dom, flush} = browserHarness();
-  const panel = dom.getElementById('clawmetryMotionPanel');
-  // Upstream dispatches this for a real click on one of its own buttons.
-  dom.listeners['yam:conversation-mode']({detail: {mode: 'reasoning'}});
-  flush();
+  window.yamTelemetry.observe(project(motionState(MOVES)));
   assert.equal(panel.hidden, true);
-  assert.equal(dom.getElementById('clawmetryMotionTab')['aria-pressed'], 'false');
+  assert.equal(button['aria-pressed'], 'false');
+  assert.equal(dom.conversation.hidden, false);
 });
 
-test('the default selection is applied once, not reasserted on every poll', () => {
+test('explicit move log selection opens its pane and polling respects later choices', () => {
   const {dom, window, flush} = browserHarness();
   const panel = dom.getElementById('clawmetryMotionPanel');
-  flush();
+  dom.getElementById('clawmetryMotionTab').click();
   assert.equal(panel.hidden, false);
-  dom.listeners['yam:conversation-mode']({detail: {mode: 'hide'}});
-  assert.equal(panel.hidden, true);
-  // Later status polls must not drag the visitor back to our tab.
-  window.yamTelemetry.observe(project(motionState(MOVES)));
+  dom.listeners['yam:conversation-mode']({detail: {mode: 'reasoning'}});
+  flush();
   window.yamTelemetry.observe(project(motionState(MOVES)));
   assert.equal(panel.hidden, true);
+});
+
+
+test('trust summary does not promote acceptance, configuration or pending rules into checked protection', () => {
+  const view=project(state());
+  assert.equal(widget.guardSummary(view).title,'No Guard decision recorded');
+  const pending={...view,trust:{schema:'clawmetry.trust.v1',guard:{state:'unconfigured'},next_run_guard:{state:'saved_for_next_run',revision:2}}};
+  assert.equal(widget.guardSummary(pending).title,'No Guard decision recorded');
+  const configured={...view,trust:{schema:'clawmetry.trust.v1',guard:{state:'configured',mode:'block',config_version:2,sequence:4,config_hash:'a'.repeat(64)}}};
+  assert.equal(widget.guardSummary(configured).title,'Rules recorded; awaiting a check');
+  const held={...view,trust:{schema:'clawmetry.trust.v1',guard:{state:'decision_recorded',mode:'block',decision:'reject',config_version:2,sequence:5,config_hash:'a'.repeat(64),missing:['fresh_measured_feedback']}}};
+  assert.equal(widget.guardSummary(held).title,'Packet held before dispatch');
+  assert.match(widget.guardSummary(held).detail,/fresh measured feedback/i);
+  assert.doesNotMatch(widget.guardSummary(held).detail,/physically stopped|robot is safe/i);
+});
+
+test('default recent events select meaningful outcomes instead of repeated feedback or timing', () => {
+  const rows=Array.from({length:200},(_,i)=>({id:i,t:100+i,kind:'observation'}));
+  rows[10]={id:10,t:110,kind:'packet_submit',waypoint_count:3};
+  rows[50]={id:50,t:150,kind:'model_timing'};
+  rows[100]={id:100,t:200,kind:'packet_completed',waypoint_count:3};
+  rows[199]={id:199,t:299,kind:'stopped'};
+  const summary=widget.runSummary(project(state()),rows);
+  assert.equal(summary.recent.length,3);
+  assert.equal(summary.recent.map(row=>row.kind).join(','),'stopped,packet_completed,packet_submit');
+  assert.equal(summary.latest.kind,'stopped');
+});
+
+test('completed-run assessment and 200 records share one bounded body without changing native handlers',()=>{
+  const {dom,window}=browserHarness();
+  const assessment=dom.createElement('section');assessment.id='liveAssessment';
+  const control=dom.createElement('button');let ratings=0;control.addEventListener('click',()=>ratings++);assessment.append(control);
+  dom.interaction.append(assessment);
+  const rows=Array.from({length:200},(_,i)=>({id:i+1,t:200+i,kind:i===199?'stopped':'observation'}));
+  window.yamTelemetry.observe(project(motionState(rows)));
+  dom.getElementById('clawmetryMotionTab').click();
+  const scroll=dom.getElementById('cm-trust-scroll'),slot=dom.getElementById('cm-guard-editor-slot');
+  assert.ok(scroll,'the integration needs one bounded scroll body');
+  assert.ok(descendants(scroll).includes(slot));
+  assert.ok(descendants(scroll).includes(assessment));
+  assert.equal(dom.getElementById('cm-recent-events').children.length,1);
+  assert.equal(dom.getElementById('cm-technical-events').children.length,200);
+  for(let i=0;i<3;i++){
+    control.textContent='Updated native rating '+i;
+    window.yamTelemetry.observe(project(motionState(rows)));
+    control.click();
+  }
+  assert.equal(ratings,3);assert.equal(assessment.parent,dom.getElementById('cm-operator-assessment'));
+  assessment.hidden=true;window.yamTelemetry.observe(project(motionState(rows)));
+  assert.equal(dom.getElementById('cm-operator-assessment').hidden,true);
+  assessment.hidden=false;window.yamTelemetry.observe(project(motionState(rows)));
+  assert.equal(dom.getElementById('cm-operator-assessment').hidden,false);
+  assert.equal(dom.events.filter(event=>event.type==='clawmetry:panel-ready').length,1);
+  dom.listeners['yam:conversation-mode']({detail:{mode:'reasoning'}});
+  assert.equal(assessment.parent,dom.interaction,'leaving ClawMetry restores the native assessment placement');
+  dom.getElementById('clawmetryMotionTab').click();
+  assert.equal(assessment.parent,dom.getElementById('cm-operator-assessment'));
+  assert.equal(descendants(dom.body).filter(node=>node.id==='liveAssessment').length,1);
+});
+
+test('reset clears a prior run summary and trust decision without removing the English editor mount',()=>{
+  const {dom,window}=browserHarness();
+  const view={...project(motionState(MOVES)),trust:{schema:'clawmetry.trust.v1',guard:{state:'decision_recorded',mode:'block',decision:'reject',config_version:2,sequence:5,config_hash:'a'.repeat(64),missing:['fresh_measured_feedback']}}};
+  window.yamTelemetry.observe(view);dom.getElementById('clawmetryMotionTab').click();
+  assert.match(dom.getElementById('cm-guard-state').textContent,/held before dispatch/);
+  const slot=dom.getElementById('cm-guard-editor-slot');
+  const editor=dom.createElement('div');editor.textContent='My rule editor';slot.append(editor);
+  window.yamTelemetry.reset();
+  assert.equal(slot.children[0],editor);
+  assert.equal(dom.getElementById('cm-guard-state').textContent,'No Guard decision recorded');
+  assert.doesNotMatch(dom.getElementById('cm-run-summary').textContent,/Raise the left arm|held before dispatch/);
+});
+
+function trustedState(){
+  const raw=state(),trace='a'.repeat(32);
+  raw.telemetry.detail={path:'/clawmetry/trace/'+trace,attempt_id:'attempt_1',episode_id:'episode_1'};
+  raw.telemetry.trust={schema:'clawmetry.trust.v1',trace_id:trace,
+    persistence:{state:'confirmed',through_sequence:42,capability:'PRIVATE_CAPABILITY'},
+    guard:{state:'decision_recorded',mode:'block',decision:'reject',config_version:2,config_hash:'b'.repeat(64),sequence:41,
+      outcome:'unknown',coverage:['max_step_deg'],reasons:[],missing:['fresh_measured_feedback'],
+      source:'duckdb_recorded_events',coverage_scope:'local_joint_trajectory',partial_window:false,raw:'PRIVATE_GUARD'},
+    next_run_guard:{state:'saved_for_next_run',revision:3,config_hash:'c'.repeat(64),
+      config:{schema:'clawmetry.blupe.guard.v1',version:1,mode:'block',max_step_deg:2,secret:'PRIVATE_CONFIG'},
+      policy:{policy_hash:'d'.repeat(64),status:'saved_for_next_run',text:'PRIVATE_RULE',
+        rules:[{field:'max_step_deg',value:2,description:'PRIVATE_DESCRIPTION'}]}}};
+  return raw;
+}
+
+test('trust projection keeps only bounded source-matched evidence and separate next-run rules',()=>{
+  const raw=trustedState(),view=project(raw);
+  assert.equal(view.trust.persistence.state,'confirmed');assert.equal(view.trust.persistence.through_sequence,42);
+  assert.equal(view.trust.guard.decision,'reject');assert.equal(view.trust.next_run_guard.state,'saved_for_next_run');
+  assert.equal(view.trust.next_run_guard.config.max_step_deg,2);
+  assert.equal(JSON.stringify(view.trust).includes('PRIVATE_'),false);
+  assert.match(view.trust.next_run_guard.policy.rules[0].description,/2/);
+  raw.telemetry.public_run_shared=false;
+  assert.equal(project(raw).trust.guard.decision,'reject','an authorized private trace may expose its own Guard without publishing task text');
+  assert.equal(project(raw).events.length,0);
+});
+
+test('foreign, missing or malformed trust never supplies current Guard or storage confirmation',()=>{
+  for(const mutate of [raw=>{raw.telemetry.trust.trace_id='e'.repeat(32);},raw=>{delete raw.telemetry.detail;},
+    raw=>{raw.telemetry.detail.attempt_id='foreign';},raw=>{raw.telemetry.trust.schema='untrusted';}]){
+    const raw=trustedState();mutate(raw);const view=project(raw);
+    assert.notEqual(view.trust?.persistence.state,'confirmed');assert.notEqual(view.trust?.guard.decision,'reject');
+  }
+  const raw=trustedState();raw.telemetry.trust.guard.source='PRIVATE_SOURCE';raw.telemetry.trust.persistence.through_sequence=Infinity;
+  raw.telemetry.trust.next_run_guard.config.max_step_deg=NaN;
+  const view=project(raw);assert.equal(view.trust.guard.state,'unavailable');
+  assert.equal(view.trust.persistence.through_sequence,null);assert.equal(view.trust.next_run_guard,null);
+  assert.equal(JSON.stringify(view.trust).includes('PRIVATE_'),false);
+});
+
+
+test('private owned trace identity resets history and loss of motion metadata clears the old feed',()=>{
+  const raw=trustedState();raw.telemetry.public_run_shared=false;
+  const store=widget.createStore();store.update(project(raw));
+  const next=trustedState();next.telemetry.public_run_shared=false;
+  next.telemetry.trust.trace_id='f'.repeat(32);next.telemetry.detail.path='/clawmetry/trace/'+'f'.repeat(32);
+  store.update(project(next));assert.equal(store.samples.length,1);
+  store.updateMotion(project(motionState(MOVES)));assert.equal(store.motion.length,4);
+  store.updateMotion(project(state()));assert.equal(store.motion.length,0);assert.equal(store.motionSource,null);
+});
+
+
+test('malformed persisted cursor or incomplete Guard identity cannot earn a confirmed or checked badge',()=>{
+  for(const value of [null,undefined,0,-1,1.5,NaN,Infinity,true,'42']) {
+    const raw=trustedState();raw.telemetry.trust.persistence.through_sequence=value;
+    const view=project(raw);assert.equal(view.trust.persistence.state,'unavailable',String(value));
+  }
+  for(const field of ['config_version','config_hash','sequence'])for(const value of [null,undefined,0,-1,true,'invalid']) {
+    const raw=trustedState();raw.telemetry.trust.guard[field]=value;
+    const view=project(raw);assert.equal(view.trust.guard.state,'unavailable',field+':'+value);
+    assert.equal(widget.guardSummary(view).title,'No Guard decision recorded');
+  }
+  const raw=trustedState();raw.telemetry.trust.next_run_guard.config.max_rate_deg_s=5;
+  raw.telemetry.trust.next_run_guard.policy.rules=[{field:'max_rate_deg_s',value:5}];
+  assert.match(project(raw).trust.next_run_guard.policy.rules[0].description,/joint target rate/);
+});
+
+
+test('an unapplied or unsupported draft holds the next launch without pretending to stop an active run',()=>{
+  for(const reason of ['unsupported_policy','unapplied_policy','owner_changed']){
+    const raw=trustedState();raw.telemetry.trust.launch_hold={state:'held',reason,text:'PRIVATE_DRAFT'};
+    const view=project(raw);assert.deepEqual(view.trust.launch_hold,{state:'held',reason});
+    assert.equal(JSON.stringify(view.trust).includes('PRIVATE_DRAFT'),false);
+    assert.equal(widget.runSummary(view).title,'Next run held for review');
+    assert.match(widget.runSummary(view).detail,/does not stop or change an active run/);
+  }
+  const raw=trustedState();raw.telemetry.trust.launch_hold={state:'held',reason:'PRIVATE_UNKNOWN'};
+  assert.equal(project(raw).trust.launch_hold,null);
+  assert.equal(widget.runSummary(project(raw)).title,'Run in progress');
+});
+
+
+test('equal attempt IDs cannot override conflicting or one-sided episode bindings',()=>{
+  for(const change of ['different','missing_detail','missing_display']){
+    const raw=trustedState();
+    if(change==='different')raw.telemetry.detail.episode_id='other_episode';
+    if(change==='missing_detail')delete raw.telemetry.detail.episode_id;
+    if(change==='missing_display'){delete raw.public_run.episode_id;}
+    const view=project(raw);assert.equal(view.detail_path,null,change);
+    assert.equal(view.trust.guard.state,'unavailable',change);assert.equal(view.trust.persistence.state,'unavailable',change);
+  }
+});
+
+test('documented complete and resetting source phases remain terminal without implying task success',()=>{
+  for(const phase of ['complete','resetting']){
+    const raw=state();raw.public_run.status=phase;const view=project(raw);
+    assert.equal(view.run.status,phase);assert.match(widget.runSummary(view).title,/Run ended/);
+    assert.doesNotMatch(widget.runSummary(view).title,/success|safe|stopped/i);
+  }
+});
+
+test('private run phase requires exact displayed attempt and episode while text remains private',()=>{
+  const raw=state();raw.telemetry.public_run_shared=false;
+  raw.public_run.task='PRIVATE_TASK';raw.public_run.model_name='PRIVATE_MODEL';raw.public_run.status='stopped';
+  const view=project(raw);
+  assert.equal(view.run.status,'stopped');assert.equal(widget.runSummary(view).title,'Run stopped');
+  assert.equal(view.run.task,null);assert.equal(view.run.model,null);assert.deepEqual(view.events,[]);
+  assert.equal(view.identity.attempt_id,null);assert.equal(view.receipt,null);
+  assert.equal(JSON.stringify(view).includes('PRIVATE_'),false);
+  for(const displayed of [{attempt_id:'other_attempt',episode_id:'episode_1'},
+    {attempt_id:'attempt_1',episode_id:'other_episode'},{attempt_id:'attempt_1'},
+    {episode_id:'episode_1'},null]) {
+    assert.equal(project(raw,103,displayed).run.status,null,JSON.stringify(displayed));
+  }
+  raw.public_run.status='PRIVATE_PHASE';assert.equal(project(raw).run.status,null);
+  raw.public_run.status=undefined;raw.trajectory.state='stopped';assert.equal(project(raw).run.status,null,'receipt cannot supply run phase');
+  raw.telemetry.public_run_shared=true;raw.public_run.task='PRIVATE_TASK';
+  const mismatched=project(raw,103,{attempt_id:'attempt_1',episode_id:'other_episode'});
+  assert.equal(mismatched.run.task,null);assert.deepEqual(mismatched.events,[]);
+});
+
+test('fixed header shows current run phase before English editor without borrowing next-run hold',()=>{
+  const {dom,window}=browserHarness(),raw=trustedState();
+  raw.telemetry.public_run_shared=false;raw.public_run.status='stopped';
+  raw.telemetry.trust.launch_hold={state:'held',reason:'unapplied_policy'};
+  window.yamTelemetry.observe(project(raw));dom.getElementById('clawmetryMotionTab').click();
+  const phase=dom.getElementById('cm-run-phase'),scroll=dom.getElementById('cm-trust-scroll');
+  assert.equal(phase.textContent,'Run stopped');assert.notEqual(phase.parent,scroll);
+  assert.equal(phase.parent.parent,dom.getElementById('clawmetryMotionPanel'));
+  assert.match(dom.getElementById('cm-run-summary').textContent,/Next run held for review/);
+  window.yamTelemetry.observe(project(raw,103,{attempt_id:'attempt_1',episode_id:'different'}));
+  assert.equal(phase.textContent,'Run status not reported');
+});
+
+test('recorded semantic refusals explain red or unknown evidence and config races remain held in monitor',()=>{
+  for(const [reason,phrase] of [['forbidden_yellow_grasp',/recognized yellow/],['forbidden_blue_grasp',/recognized blue/],['forbidden_green_grasp',/recognized green/],['forbidden_red_grasp',/recognized red/],['color_guard_calibration_unvalidated',/physical validation/],['guard_configuration_changed',/Rules changed/]]){
+    const view={trust:{schema:'clawmetry.trust.v1',guard:{state:'decision_recorded',mode:'monitor',decision:'reject',config_version:2,sequence:5,config_hash:'a'.repeat(64),missing:[reason]}}};
+    const summary=widget.guardSummary(view);assert.equal(summary.title,'Packet held before dispatch');assert.match(summary.detail,phrase);
+  }
+});
+
+test('actual trust projection retains color config and fixed yellow/red explanations without raw text',()=>{
+  for(const color of ['yellow','red','blue','green']){
+    const raw=trustedState(),trust=raw.telemetry.trust;
+    const rule={forbidden_colors:[color],max_capture_age_s:2};
+    trust.next_run_guard.config.object_color_guard=rule;
+    trust.next_run_guard.policy.rules.push({field:'object_color_guard',value:rule,description:'PRIVATE_DESCRIPTION'});
+    trust.guard.reasons=['forbidden_'+color+'_grasp','PRIVATE_GUARD'];trust.guard.missing=[];trust.guard.coverage=['object_color_guard'];
+    const view=project(raw);
+    assert.deepEqual(view.trust.next_run_guard.config.object_color_guard,rule);
+    assert.match(view.trust.next_run_guard.policy.rules[1].description,new RegExp(color));
+    assert.match(widget.guardSummary(view).detail,new RegExp('recognized '+color));
+    assert.deepEqual(view.trust.guard.coverage,['object_color_guard']);
+    assert.equal(JSON.stringify(view).includes('PRIVATE_'),false);
+    raw.telemetry.detail.attempt_id='foreign';assert.notEqual(widget.guardSummary(project(raw)).tone,'held');
+  }
+});
+test('projected color rules reject malformed subsets and retain calibration hold reasons',()=>{
+  for(const forbidden_colors of [[],['purple'],['red','red'],['yellow','red'],Array(5).fill('red')]){
+    const raw=trustedState();raw.telemetry.trust.next_run_guard.config.object_color_guard={forbidden_colors,max_capture_age_s:2};
+    assert.equal(project(raw).trust.next_run_guard,null);
+  }
+  const raw=trustedState();raw.telemetry.trust.guard.reasons=['color_guard_calibration_unvalidated'];raw.telemetry.trust.guard.missing=['validated_extrinsics'];
+  assert.match(widget.guardSummary(project(raw)).detail,/physical validation|Validated camera/);
+});
+
+test('recorded outcome separates actual yellow/red feedback holds from next-run settings',()=>{
+  for(const color of ['yellow','red']){
+    const raw=trustedState(),guard=raw.telemetry.trust.guard;
+    guard.config={schema:'clawmetry.blupe.guard.v1',version:2,mode:'block',max_step_deg:2,
+      object_color_guard:{forbidden_colors:[color],max_capture_age_s:2}};
+    guard.missing=['fresh_measured_hardware_baseline','object_color_feedback_stale'];
+    raw.telemetry.trust.next_run_guard.config.object_color_guard={forbidden_colors:[color==='red'?'yellow':'red'],max_capture_age_s:2};
+    const view=project(raw),outcome=widget.runSummary(view).outcome;
+    assert.equal(outcome.title,'Blocked by Guard');assert.match(outcome.detail,/feedback expired/i);
+    assert.doesNotMatch(outcome.detail,/recognized/);assert.match(outcome.rule,new RegExp(color));
+    assert.deepEqual(view.trust.guard.config,guard.config);
+  }
+});
+
+test('a calibrated-region veto and an unqualified camera hold have different outcome explanations',()=>{
+  const raw=trustedState();raw.telemetry.trust.guard.missing=['validated_extrinsics'];
+  let outcome=widget.runOutcome(project(raw));assert.match(outcome.detail,/camera geometry/);
+  assert.doesNotMatch(outcome.detail,/recognized yellow/);
+  raw.telemetry.trust.guard.missing=[];raw.telemetry.trust.guard.reasons=['forbidden_yellow_grasp'];
+  raw.telemetry.trust.guard.outcome='violation';
+  outcome=widget.runOutcome(project(raw));assert.match(outcome.detail,/recognized yellow region/);
+});
+
+test('stopped and model completion stay unverified while explicit terminal failure is failed',()=>{
+  for(const status of ['stopped','completed','complete','resetting']){
+    const raw=state();raw.public_run.status=status;
+    raw.public_run.task_success=true;raw.public_run.success=true;
+    raw.public_run.events.push({id:3,timestamp:102,kind:'model_response',message:'done: {"summary":"success"}'});
+    assert.equal(widget.runOutcome(project(raw)).title,'Unverified');
+  }
+  for(const status of ['failed','timed_out','safety_aborted']){
+    const raw=state();raw.public_run.status=status;assert.equal(widget.runOutcome(project(raw)).title,'Failed');
+  }
+});
+
+test('foreign Guard evidence and mismatched recorded config never borrow draft values',()=>{
+  const raw=trustedState();raw.telemetry.trust.guard.config={schema:'clawmetry.blupe.guard.v1',version:1,mode:'block',object_color_guard:{forbidden_colors:['yellow'],max_capture_age_s:2}};
+  let view=project(raw);assert.equal(view.trust.guard.config,undefined);
+  assert.doesNotMatch(widget.runOutcome(view).rule,/yellow/);
+  raw.telemetry.detail.attempt_id='foreign';view=project(raw);
+  assert.equal(widget.runOutcome(view).title,'Unverified');assert.equal(widget.runOutcome(view).rule,null);
+});
+
+test('prominent recorded outcome remains above the editor and survives review resizing',()=>{
+  const {dom,window}=browserHarness(),raw=trustedState();
+  raw.telemetry.trust.guard.missing=['object_color_capture_stale'];
+  window.yamTelemetry.observe(project(raw));dom.getElementById('clawmetryMotionTab').click();
+  const card=dom.getElementById('cm-run-outcome'),scroll=dom.getElementById('cm-trust-scroll');
+  assert.equal(dom.getElementById('cm-run-outcome-title').textContent,'Blocked by Guard');
+  assert.match(dom.getElementById('cm-run-outcome-detail').textContent,/camera frame expired/);
+  assert.equal(card.parent,scroll);assert.ok(scroll.children.indexOf(card)<scroll.children.indexOf(dom.getElementById('cm-guard-editor-slot')));
+  const editor=dom.getElementById('cm-guard-editor-slot');
+  dom.getElementById('cm-expand-review').click();dom.getElementById('cm-expand-review').click();
+  assert.equal(dom.getElementById('cm-guard-editor-slot'),editor);
+  assert.equal(dom.getElementById('cm-run-outcome'),card);
+});
+
+
+function admissionEvent(version=1,robot_id='yam-1',uncertain=false) {
+  return {version,robot_id,task_hash:'c'.repeat(64),guard_admission:{schema:'clawmetry.intent_guard.v1',version:1,
+    decision:'reject',mode:'block',scope:'explicit_color_intent',physical_permission_granted:false,
+    outcome:uncertain?'intent_uncertain':'intent_violation',
+    reason_code:uncertain?'color_intent_needs_clarification':'forbidden_color_requested',
+    task_hash:'c'.repeat(64),config_hash:'d'.repeat(64),forbidden_colors:['yellow'],
+    requested_colors:uncertain?[]:['yellow'],blocked_colors:uncertain?[]:['yellow'],
+    summary:'PRIVATE_SERVER_TEXT'},task:'PRIVATE_TASK',runner_name:'PRIVATE_RUNNER'};
+}
+test('task-bound admission state accepts exact typed veto only and stores no raw task or prose',()=>{
+  const state=widget.createAdmissionState(),event=admissionEvent();
+  assert.equal(state.reject(event),false);state.start(event);assert.equal(state.reject(event),true);
+  assert.equal(state.current().title,'Blocked by Guard');assert.match(state.current().rule,/yellow/);
+  assert.equal(JSON.stringify(state.current()).includes('PRIVATE_'),false);
+  state.start(admissionEvent(2));assert.equal(state.current(),null);assert.equal(state.reject(event),false);
+  state.reject(admissionEvent(2));state.accept(admissionEvent(1));assert.ok(state.current());
+  state.accept(admissionEvent(2));assert.equal(state.current(),null);
+  state.start(event);assert.equal(state.reject(admissionEvent(1,'other-robot')),false);
+  for(const change of [value=>value.task_hash='e'.repeat(64),value=>value.guard_admission.decision='continue',
+    value=>value.guard_admission.forbidden_colors=['yellow','red'],value=>value.guard_admission.physical_permission_granted=true,
+    value=>value.guard_admission.blocked_colors=[],value=>value.guard_admission.config_hash='bad',
+    value=>value.guard_admission.outcome='no_conflict']) {
+    const bad=admissionEvent();change(bad);assert.equal(state.reject(bad),false);
+  }
+  assert.equal(state.reject(admissionEvent(1,'yam-1',true)),true);assert.match(state.current().detail,/Clarify/);
+  state.clear();assert.equal(state.current(),null);assert.equal(state.reject(event),false);
+});
+test('verified local veto opens existing review without borrowing previous run or creating history',()=>{
+  const {dom,window,network}=browserHarness(),raw=trustedState();
+  window.yamTelemetry.observe(project(raw));
+  const before=dom.getElementById('cm-technical-events').textContent;
+  const send=(name,detail)=>window.listeners[name]({detail});
+  const event=admissionEvent();send('yam:run-submitting',event);
+  assert.equal(dom.getElementById('clawmetryMotionPanel').hidden,true);
+  send('yam:run-rejected',admissionEvent(0));assert.equal(dom.getElementById('clawmetryMotionPanel').hidden,true);
+  const body=dom.getElementById('cm-trust-scroll');body.scrollTop=250;
+  send('yam:run-rejected',event);
+  assert.equal(body.scrollTop,0);
+  assert.equal(dom.getElementById('clawmetryMotionPanel').hidden,false);
+  assert.equal(dom.getElementById('cm-run-outcome-context').textContent,'Current request · not queued');
+  assert.equal(dom.getElementById('cm-run-outcome-title').textContent,'Blocked by Guard');
+  assert.match(dom.getElementById('cm-run-outcome-detail').textContent,/No model call.*no robot task was queued/);
+  assert.match(dom.getElementById('cm-run-outcome-rule').textContent,/yellow/);
+  assert.match(dom.getElementById('cm-run-summary').textContent,/Previous robot run/);
+  const link=descendants(dom.getElementById('clawmetryMotionPanel')).find(node=>node.className==='cm-motion-detail');
+  assert.equal(link.textContent,'Previous run ↗');
+  assert.equal(dom.getElementById('clawmetryMotionPanel').textContent.includes('PRIVATE_'),false);
+  assert.equal(widget.runOutcome(project(raw)).detail.includes('No model call'),false);
+  assert.equal(dom.getElementById('cm-technical-events').textContent,before);
+  assert.equal(network(),0);
+  send('yam:run-accepted',event);assert.equal(dom.getElementById('cm-run-outcome-context').textContent,'Recorded robot run');
+});
+test('local admission is cleared on submit, accepted launch, owner reset, robot and source changes',()=>{
+  for(const action of ['submit','accepted','cleared','robot','source','pagehide']) {
+    const {dom,window}=browserHarness();window.yamTelemetry.observe(project(trustedState()));
+    const event=admissionEvent();window.listeners['yam:run-submitting']({detail:event});window.listeners['yam:run-rejected']({detail:event});
+    if(action==='submit')window.listeners['yam:run-submitting']({detail:admissionEvent(2)});
+    if(action==='accepted')window.listeners['yam:run-accepted']({detail:event});
+    if(action==='cleared')window.listeners['yam:run-cleared']({detail:{}});
+    if(action==='robot')window.listeners['blupe-robot-selected']();
+    if(action==='source'){const raw=trustedState();raw.public_run.episode_id='next';window.yamTelemetry.observe(project(raw));}
+    if(action==='pagehide')window.listeners.pagehide();
+    if(action==='pagehide')window.listeners.pageshow();
+    // Visibility/render also proves the cleared state cannot reappear from a timer.
+    dom.listeners.visibilitychange();
+    assert.equal(dom.getElementById('cm-run-outcome-context').textContent,'Recorded robot run',action);
+  }
+});
+
+
+test('idle chat hides nonexistent outcomes and keeps technical facts collapsed',()=>{
+  const {dom,window,network}=browserHarness();
+  window.yamTelemetry.observe(project({public_run:null,telemetry:{public_run_shared:false}}));
+  dom.getElementById('clawmetryMotionTab').click();
+  assert.equal(dom.getElementById('cm-run-outcome').hidden,true);
+  const technical=dom.getElementById('cm-technical-activity');
+  assert.notEqual(technical.open,true);
+  assert.ok(descendants(technical).includes(dom.getElementById('cm-guard-state')));
+  const empty=descendants(dom.getElementById('clawmetryMotionPanel')).find(node=>node.className==='cm-activity-empty');
+  assert.equal(empty.hidden,false);assert.match(empty.textContent,/Send a task/);
+  assert.equal(network(),0);
+});
+
+test('live trace stays distinct from last recording and visible activity is chronological',()=>{
+  const {dom,window}=browserHarness(),raw=motionState(MOVES);
+  raw.telemetry.detail={path:'/clawmetry/trace/'+'a'.repeat(32),attempt_id:'attempt_1',episode_id:'episode_1'};
+  window.yamTelemetry.observe(project(raw));dom.getElementById('clawmetryMotionTab').click();
+  const link=descendants(dom.getElementById('clawmetryMotionPanel')).find(node=>node.className==='cm-motion-detail');
+  assert.equal(link.textContent,'Open live trace ↗');
+  const rows=dom.getElementById('cm-recent-events').children;
+  const times=rows.map(row=>row.children.find(child=>child.tagName==='time').dateTime);
+  assert.deepEqual(times,[...times].sort());
+  assert.equal(dom.getElementById('cm-run-outcome').hidden,true,'a running task has no final result yet');
+});
+
+
+test('private ended run does not claim a task is still in progress',()=>{
+  const {dom,window}=browserHarness(),raw=state();raw.telemetry.public_run_shared=false;
+  raw.public_run.status='stopped';window.yamTelemetry.observe(project(raw));
+  const task=descendants(dom.getElementById('clawmetryMotionPanel')).find(node=>node.className==='cm-live-task');
+  assert.equal(task.textContent,'Task text is private.');assert.doesNotMatch(task.textContent,/in progress/);
+});
+
+test('local request refusal never presents previous run moves as current activity',()=>{
+  const {dom,window}=browserHarness();window.yamTelemetry.observe(project(motionState(MOVES)));
+  const event=admissionEvent();window.listeners['yam:run-submitting']({detail:event});window.listeners['yam:run-rejected']({detail:event});
+  assert.equal(dom.getElementById('cm-recent-events').hidden,true);
+  assert.equal(dom.getElementById('cm-run-outcome').hidden,false);
+  window.listeners['yam:run-cleared']({detail:{}});
+  assert.equal(dom.getElementById('cm-recent-events').hidden,false);
 });

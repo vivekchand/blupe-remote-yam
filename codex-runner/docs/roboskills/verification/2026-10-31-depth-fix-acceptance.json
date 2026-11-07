@@ -1,0 +1,167 @@
+{
+  "reviewedAt": "2026-10-31T17:48:11.844775+00:00",
+  "website": "https://blupe-bimanual-skills.andlyu.chatgpt.site/#physical-yam",
+  "siteVersion": 19,
+  "siteSource": "4d76cfb3df3a4feceaef0ed07ce7e63458dc51df",
+  "runtimeSource": "058d54f8ca424692feea83ecdf3b7caba498d5a5",
+  "sourceRepository": "https://github.com/andlyu/blupe-remote-bots",
+  "requirements": [
+    {
+      "number": 1,
+      "requirement": "Website and associated source",
+      "status": "PASS",
+      "evidence": "Public Site19/source4d76cfb; live058d54f via PR212/5f3724a after all six required checks. Provider97467/physical97471, simulation14674 preserved. Pinned upstream/initial prompt and native limits unchanged."
+    },
+    {
+      "number": 2,
+      "requirement": "Public demo and source",
+      "status": "PASS with existing archive exception",
+      "evidence": "Audience unchanged public; new run assets and native simulation results remain anonymous. The specifically denied original453a9a recording remains local/excluded under prior owner scope; no retry."
+    },
+    {
+      "number": 3,
+      "requirement": "Actual method clearly named",
+      "status": "PASS",
+      "evidence": "Genuine RoboSkills8a286023 core.agent/Repl; Sol/none then Astra/medium. Subsequent public plan_move reports independent-arm finite correction samples through the actual canonical path; prompt/API initial path unchanged. Actual request/template hashes retained."
+    },
+    {
+      "number": 4,
+      "requirement": "Confirmed editable human name/email",
+      "status": "PASS",
+      "evidence": "Normal anonymous form used real editable Andrew Lyubovsky name and confirmed email; email/caps excluded from public data. Contact field cleared only after submission for screenshots."
+    },
+    {
+      "number": 5,
+      "requirement": "Approach and runner in run context",
+      "status": "PASS",
+      "evidence": "Actual UI/backend public_run and history attribute Andrew Lyubovsky and RoboSkills. Same-run provider snapshot/source receipt separate from underlying model."
+    },
+    {
+      "number": 6,
+      "requirement": "Human attribution distinct from execution mode",
+      "status": "PASS",
+      "evidence": "Human identity retained; automated verification is separate execution mode, never fabricated identity."
+    },
+    {
+      "number": 7,
+      "requirement": "Method runs on physical YAMs",
+      "status": "OPEN",
+      "evidence": "Currentadfe4fbf executes source inspection and40mm view retreat,60waypoints/3packets84.302525s. Agent remeasures actual masks, reports mixed top-face block/table returns and stops before contact. No grasp/lift/transfer/release/withdrawal/stack. Later reserve-aware selection not reached physically; offline genuine-agent selection passed separately."
+    },
+    {
+      "number": 8,
+      "requirement": "Actual arms visible live",
+      "status": "PASS",
+      "evidence": "Actual top/left/right camera switching exercised during method execution; live arms alongside owned Stop."
+    },
+    {
+      "number": 9,
+      "requirement": "Immediate just-completed replay",
+      "status": "PASS",
+      "evidence": "Actual52.5s native replay played to end, then sought to displayed14s showing camera10:42:45.2PDT. Matching task-not-completed/agent-assessment/no-native-score label retains the actual reason; physical execution and task outcome stay distinct."
+    },
+    {
+      "number": 10,
+      "requirement": "Previous-run browsing and replay",
+      "status": "PASS",
+      "evidence": "Selected previous5c9dc through normal history;49.5s replay loaded and advanced11.836s through the native player. Source/result attribution and real footage remained tied to the selected run."
+    },
+    {
+      "number": 11,
+      "requirement": "Simulation executions reviewable",
+      "status": "PASS",
+      "evidence": "Existing native simulation build failure/demo8of8/solver-not-run, source task, checks and real replay remain publicly reviewable; unchanged by physical fix. No solved-solver claim."
+    },
+    {
+      "number": 12,
+      "requirement": "Usable visitor path",
+      "status": "PASS",
+      "evidence": "Anonymous Site19 normal editable form used confirmed human fields/source31083/target314108 and a task clarification for noncontact inspection. Normal queue/lease, actual progress, owned Stop and exact task/marks/history attribution verified. No operator sign-in."
+    },
+    {
+      "number": 13,
+      "requirement": "Every-run startup timing",
+      "status": "OPEN: seven later failed/unverified cases outside accepted exceptions",
+      "evidence": "Sixteen measured startup passes includeadfe4fbf. OriginalUI42/native replay28 unchanged10:42:43.5; replay30 visibly moved10:42:45.2, also verified in website player. Upper14.516068s post-Home/28.122540s full Run with zero queue deduction. Coarser nextUI frame45.8 alone would straddle15s; native replay supplies retained visual bound. Seven historical cases remain outside accepted exceptions."
+    },
+    {
+      "number": 14,
+      "requirement": "Persistent honest progress and recovery",
+      "status": "PASS",
+      "evidence": "Actual queue/Home/scene/model/motion/recording stages and honest incomplete-task reason retained. Single Run/email immediately cleared; first guarded post-frame0.641s after click,152retained/197attempts. Native parked/DISABLED/torqueoff/autoqueue verified; no failed/uncertain-motion replay."
+    },
+    {
+      "number": 15,
+      "requirement": "Final normal-UI physical verification",
+      "status": "OPEN",
+      "evidence": "Final normalUIadfe4fbf verifies released source/genuine agent/source inspection/view retreat/live/actual replay/seek/native parking and both startup limits. Agent stops on mixed selected-face depth before contact; retained grasp/transfer/release/withdrawal/stable stack remain open."
+    }
+  ],
+  "checked": 12,
+  "unchecked": [
+    7,
+    13,
+    15
+  ],
+  "physicalTaskSuccess": "UNVERIFIED",
+  "existingOwnerExceptions": [
+    {
+      "instruction": "Accept historical exceptions",
+      "scope": "Fixed five archived physical runs before version13, covering historical timing failures and missing original measurements; current v13 passed both limits; future runs retain the limits.",
+      "recordedAt": "2026-10-31T06:28:03.937020+00:00",
+      "unattended_reclassification": false
+    },
+    {
+      "recordedAt": "2026-10-31T06:35:11.310491+00:00",
+      "instruction": "so why is this an issue? This just simply doesn't matter. All that we care about is that the method is reflected and that the 15 reqs pass",
+      "scope": "Original failed development clip453a9a037e874840ad4382597c25e8c1 is outside the release-required public demo archive. Keep the existing local file and prior specific upload denial; do not retry its upload. This is a completion-scope exception, not a newly asserted privacy concern or confidential-visibility policy. All current method/demo/source/live/replay/simulation materials remain public."
+    },
+    {
+      "instruction": "Accept the seven historical timing exceptions",
+      "run_ids": [
+        "ec2ecd43555b4c20a5c7e359ddb369d7",
+        "f7b751b7a15240a8a71e5d88206104ea",
+        "899e4cee34eb48308989c58014956edc",
+        "2a97205b588f40b089ca4a420bc264f4",
+        "3e3c56a9d77d486086aa8e13b5d61d69",
+        "e3426b9a67e74877a6df5794c55d21a5",
+        "44ae94bf6daa4f3ba8a1470487faa070"
+      ],
+      "scope": "Exact seven post-v13 development cases listed in PR188 and accepted by owner in this chat; preserve failed/unverified timings and task failures. No future timing waiver.",
+      "source": "Owner reply retained in PR190 checklist; this record timestamp is audit assembly, not an inferred consent time.",
+      "recordedAt": "2026-10-31T10:51:01.595221+00:00"
+    }
+  ],
+  "pendingHistoricalTimingExceptions": [
+    "900123781dec40b49bb223e6c91a4283",
+    "2437a5f1acf84da090bb360ecc1d756a: zero-packet refusal after Home; no motion onset to qualify",
+    "e15b4276205b41f082f0c0303e1a21fe: afterHome zero-packet vertical-only refusal; Run-click not measured",
+    "63f7924023834731b5afce3e066a59a0: postHome21.737\u201322.737s FAIL; queue-adjusted24.512\u201325.559s PASS",
+    "812bf9eba1c9461d8323c29a276b8639: afterHome zero-packet false agent refusal; no first method motion",
+    "c7468c5d44f84baab399bc45f19e736e: postHome18.291528s upper FAIL (packet-ready lower16.739395s); rawRun30.731225s, observedqueue-adjusted20.531041s PASS30",
+    "8b9ab1fec23f4dd6acf8fe6b834c46a5: native camera onset postHome14.855321\u201315.655321s straddles15s UNVERIFIED; fullRun upper29.521521s PASS30 without queue subtraction"
+  ],
+  "notApplicableStartup": [
+    "540a8e90829340d99038076309fd48ea: cancelled before admission, no Home/episode/model/packet"
+  ],
+  "currentMeasuredStartupRuns": [
+    "0a388af5f2de4eae8b2d4018b3bfd2af",
+    "e50e781c38c044bc8b1248c55ca54b83",
+    "5c9dcf0b80c54b0f97f7d357ff1ef981",
+    "f4346b709a134c4ba36ddc9e9f2ee8d6",
+    "e73001451e504c5f83aa87db59495f61",
+    "d3e9533c00af4883afe73c359d254442",
+    "dc54f9d2ab40471796028d43d991cde3",
+    "cd7316b5a15847a49769a456c300c54d",
+    "fae84cbc177940b9a5e0eec76c5e2121",
+    "7f23d80e1b0644f18fc88589ca72fbe9",
+    "a264d5d7c2384119b9d426ce99d6d5ac",
+    "c77e42b30927403e89e94ace21016e26",
+    "d68d592f48fa43c38e88475cf4454975",
+    "2a7c2a77824647cdbf031b48a20e6058",
+    "29b59179f3d3433897dfe7b57aec88cb",
+    "adfe4fbf492849cb80a3e8074923c767"
+  ],
+  "candidateRuntimeSource": "058d54f8ca424692feea83ecdf3b7caba498d5a5",
+  "candidateEvidence": "2026-10-31-tracking-reserve-results.md"
+}

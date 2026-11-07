@@ -38,6 +38,7 @@ from remote_yam.reactions import Reactions, EMOJIS
 
 ACTIVE = {"queued", "preparing", "running"}
 COOKIE = "__Host-yam-visitor"
+LIVE_VIEWER_SECONDS = 30
 
 
 def model_display_name(provider):
@@ -51,14 +52,47 @@ def model_display_name(provider):
         if match:
             return match[1].title() + ' ' + match[2] + ('.' + match[3] if match[3] else '')
         return model or "Claude"
-    return {"groot": "GR00T", "local_raise_lower": "Built-in policy"}.get(name,
+    return {"groot": "GR00T", "molmoact2": "MolmoAct2", "dreamzero": "DreamZero", "local_raise_lower": "Built-in policy"}.get(name,
         'Astra' if model == 'gpt-6-astra' else model or 'Model not recorded')
 
 
+def _guard_admission_payload(value):
+    """Optional trusted-host evidence; arbitrary exception fields stay private."""
+    if (not isinstance(value, dict) or value.get('schema') != 'clawmetry.intent_guard.v1'
+            or type(value.get('version')) is not int or value['version'] != 1
+            or value.get('decision') != 'reject' or value.get('mode') != 'block'
+            or value.get('scope') != 'explicit_color_intent'
+            or value.get('physical_permission_granted') is not False
+            or value.get('outcome') not in ('intent_violation', 'intent_uncertain')):
+        return None
+    expected_reason = 'forbidden_color_requested' if value['outcome'] == 'intent_violation' else 'color_intent_needs_clarification'
+    if value.get('reason_code') != expected_reason:
+        return None
+    for key in ('config_hash', 'task_hash'):
+        if not isinstance(value.get(key), str) or not re.fullmatch('[a-f0-9]{64}', value[key]):
+            return None
+    for key in ('forbidden_colors', 'requested_colors', 'blocked_colors'):
+        colors = value.get(key)
+        if (not isinstance(colors, list) or len(colors) > 4
+                or any(type(color) is not str or color not in ('blue', 'green', 'red', 'yellow') for color in colors)
+                or colors != sorted(set(colors))):
+            return None
+    blocked = sorted(set(value['forbidden_colors']) & set(value['requested_colors']))
+    if (not value['forbidden_colors'] or value['blocked_colors'] != blocked
+            or bool(blocked) != (value['outcome'] == 'intent_violation')
+            or not isinstance(value.get('summary'), str) or not 1 <= len(value['summary']) <= 600):
+        return None
+    keys = ('schema', 'version', 'decision', 'outcome', 'reason_code', 'summary', 'mode',
+            'config_hash', 'task_hash', 'forbidden_colors', 'requested_colors', 'blocked_colors',
+            'scope', 'physical_permission_granted')
+    return json.loads(json.dumps({key: value[key] for key in keys}))
+
+
 class RequestError(Exception):
-    def __init__(self, status: int, message: str, *, setup=None):
+    def __init__(self, status: int, message: str, *, setup=None, guard_admission=None):
         self.status, self.message = status, message
         self.setup = setup
+        self.guard_admission = _guard_admission_payload(guard_admission)
 
 
 class HostedSessionAPI(HttpSessionAPI):
@@ -129,8 +163,11 @@ class Visitor:
     launch_requested_at: float | None = None
     chat_id: str = field(default_factory=lambda: secrets.token_hex(4))
     last_chat: float = -float("inf")
+    last_data_chat: float = -float("inf")
+    data_chat_busy: bool = False
     last_reaction: float = -float("inf")
     last_stream_report: float = -float("inf")
+    last_watched: float = -float("inf")
     runner_task: str = ""
     runner_name: str = "Anonymous"
     runner_session_id: str | None = None
@@ -142,6 +179,8 @@ class Visitor:
     subscription_prompts: dict[str, str] = field(default_factory=dict)
     visitor_chat: object | None = field(default=None, repr=False)
     retired: bool = False
+    retain_recordings: bool = False
+    assessment_session: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def close(self):
@@ -158,7 +197,7 @@ class Visitor:
         worker = self.controller._worker
         if worker is not None:
             worker.join(timeout=50)
-        if not self.controller.busy():
+        if not self.retain_recordings and not self.controller.busy():
             shutil.rmtree(self.directory, ignore_errors=True)
 
 
@@ -169,7 +208,7 @@ class HostedRunner:
                  max_sessions: int = 32, idle_seconds: float = 1800,
                  lifetime_seconds: float = 7200, api_factory=None,
                  provider_factory=None, api_depth_provider_factory=None, use_api_depth=False, extra_providers=None, chat_database=None, share_conversation=True,
-                 groot_key_file="", groot_config=None, dream_credentials_file="", dream_python="", dream_worker_pool=None, dream_worker_factory=None, dream_worker_ready=None, local_codex=False, local_claude=False, default_provider="openai", robots=None, robot_id="yam-1", camera_names=CAMERA_NAMES, joint_counts=(6,6), hardware=None, policy_camera_names=None):
+                 groot_key_file="", groot_config=None, runpod_key_file="", runpod_config=None, dream_credentials_file="", dream_python="", dream_worker_pool=None, dream_worker_factory=None, dream_worker_ready=None, local_codex=False, local_claude=False, default_provider="openai", robots=None, robot_id="yam-1", camera_names=CAMERA_NAMES, joint_counts=(6,6), hardware=None, policy_camera_names=None, recording_root=None, operator_status_origin=None):
         parsed = urlsplit(public_origin)
         if (not parsed.hostname or parsed.path not in {"", "/"} or parsed.query
                 or parsed.fragment or parsed.username or parsed.password):
@@ -239,6 +278,29 @@ class HostedRunner:
         self.use_api_depth = use_api_depth
         self.extra_providers = dict(extra_providers or {})
         self.camera_source = CameraFrameSource(camera_origin, camera_names=self.camera_names)
+        self.runpod_providers = {}
+        if runpod_key_file and robot_id == 'yam-1' and self.hardware == 'yam' and self.joint_counts == (6, 6):
+            from remote_yam.yam_runpod_policy import YAMRunpodAdapter, MODELS
+            if not {'top', 'left', 'right'}.issubset(self.camera_names):
+                raise ValueError('YAM1 joint policies require all three camera roles')
+            for name, spec in (runpod_config or {}).items():
+                if name not in MODELS or not isinstance(spec, dict) or not spec.get('endpoint'):
+                    raise ValueError('Invalid YAM1 RunPod policy configuration')
+                selected = MODELS[name]
+                def factory(model, directory, name=name, endpoint=spec['endpoint'], selected=selected):
+                    if model not in ('', selected['model']):
+                        raise RequestError(400, 'Unknown YAM1 checkpoint')
+                    return YAMRunpodAdapter(Path(runpod_key_file).expanduser().read_text().strip(),
+                        provider=name, endpoint=endpoint, robot_id=self.robot_id,
+                        camera_source=CameraFrameSource(camera_origin, camera_names=('top', 'left', 'right')))
+                self.extra_providers[name] = factory
+                self.runpod_providers[name] = dict(label=selected['label'], model=selected['model'],
+                    default_run_duration_s=120,
+                    help='YAM1 joint policy using the overhead and wrist cameras. GPU preparation can take several minutes.')
+        from remote_yam.run_data_chat import OpenAIDataChat
+        from remote_yam.run_data_search import SourceSnapshot
+        self.data_chat_sources = SourceSnapshot()
+        self.data_chat = OpenAIDataChat.configured()
         self.visitors: dict[str, Visitor] = {}
         self.monitor_api = self.api_factory()
         self.dream_providers = {}
@@ -278,22 +340,35 @@ class HostedRunner:
         self.observation = None
         self.queue = None
         self.operator_auto_queue = None
+        self.operator_status_origin = operator_status_origin
         from remote_yam.past_runs import PastRuns
         from remote_yam.run_history import run_models
         self.past_runs = PastRuns(robot_id=None, model_reader=lambda: run_models(self.submission_log.path))
+        if os.environ.get('YAM_PUBLIC_RUN_SOURCES'):
+            from remote_yam.integration_runs import IntegrationRuns
+            self.past_runs = IntegrationRuns(self.past_runs, json.loads(os.environ['YAM_PUBLIC_RUN_SOURCES']))
         self.task = None
         self.cleanups = set()
         self.frame_cache = {}
         self.frame_locks = {name: threading.Lock() for name in self.camera_names}
-        self.root = Path(tempfile.mkdtemp(prefix="yam-web-"))
+        self.retain_recordings = recording_root is not None
+        if self.retain_recordings and not (development and parsed.hostname == "127.0.0.1"):
+            raise ValueError("Durable station recordings require loopback hosting")
+        self.root = Path(recording_root).expanduser().resolve() if self.retain_recordings else Path(tempfile.mkdtemp(prefix="yam-web-"))
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
+        metadata_root = self.root if self.retain_recordings else ROOT / "data"
         from remote_yam.chat_history import ChatHistory
         self.chat_history = ChatHistory(chat_database or self.root / "chat.sqlite3")
         self.reactions = Reactions()
-        self.social_database = Path(os.environ.get('YAM_SOCIAL_DATABASE', ROOT / 'data/run-socials.sqlite3'))
+        self.social_database = Path(os.environ.get('YAM_SOCIAL_DATABASE', metadata_root / 'run-socials.sqlite3'))
         from remote_yam.past_runs import RunNames
-        self.run_names = RunNames(os.environ.get('YAM_RUN_NAMES_DATABASE', ROOT / 'data/run-names.sqlite3'))
-        self.submission_log = SubmissionLog(os.environ.get("YAM_SUBMISSION_DATABASE", ROOT / "data/queue-submissions.sqlite3"))
+        self.run_names = RunNames(os.environ.get('YAM_RUN_NAMES_DATABASE', metadata_root / 'run-names.sqlite3'))
+        self.submission_log = SubmissionLog(os.environ.get("YAM_SUBMISSION_DATABASE", metadata_root / "queue-submissions.sqlite3"))
+        from remote_yam.run_assessments import RunAssessments
+        from remote_yam.task_cloud import TaskCloud
+        self.run_assessments = RunAssessments(os.environ.get('YAM_ASSESSMENT_DATABASE', metadata_root / 'run-assessments.sqlite3'))
+        self.task_cloud = TaskCloud(os.environ.get('YAM_TASK_CLOUD_DATABASE', metadata_root / 'task-cloud.sqlite3'))
         self.remembered_names = set()
 
     async def public_extension(self, scope, receive, send, headers):
@@ -333,10 +408,6 @@ class HostedRunner:
     def validate_launch(self, visitor, payload, paid):
         """Application admission rules, before shared robot/provider validation."""
 
-    def resolve_api_depth_launch(self, prompt):
-        """Optional text-only policy routing, before constructing a depth provider."""
-        return None
-
     def page(self):
         return (ROOT / "static/hosted.html").read_bytes()
 
@@ -362,16 +433,32 @@ class HostedRunner:
                 return
             self.remembered_names.add(eid)
 
+    def assessment_user(self, visitor):
+        """Hosting hook: return an existing recorded account ID, never request identity.
+
+        Applications may set recorded_user_id after their existing authentication.
+        It is never read from assessment request JSON or sent to public clients.
+        """
+        return getattr(visitor, 'recorded_user_id', None)
+
+    def remember_assessment_owner(self, visitor):
+        """Run in maintenance/read paths; never add overlay I/O before Stop."""
+        state = visitor.controller.status()
+        eid = state.get('episode_id')
+        if eid and visitor.runner_session_id and state.get('session_id') == visitor.runner_session_id:
+            self.run_assessments.register(eid, visitor.assessment_session, self.assessment_user(visitor),
+                ended=state.get('status') not in ACTIVE | {'idle'})
+
     def new_visitor(self):
         if len(self.visitors) >= self.max_sessions:
             raise RequestError(503, "All browser sessions are busy. Please try again shortly.")
         capability = secrets.token_urlsafe(32)
-        directory = self.root / secrets.token_hex(16)
-        directory.mkdir(mode=0o700)
+        directory = self.root / ("recordings" if self.retain_recordings else secrets.token_hex(16))
+        directory.mkdir(mode=0o700, exist_ok=self.retain_recordings)
         visitor = Visitor(EphemeralController(
             LoggedSessionAPI(self.api_factory(), self.submission_log), hardware_control_enabled=self.hardware_control,
             recording_root=directory, robot_id=self.robot_id, joint_counts=self.joint_counts,
-            share_conversation=self.share_conversation), directory)
+            share_conversation=self.share_conversation), directory, retain_recordings=self.retain_recordings)
         visitor.controller._public_redactor = visitor.public_redactor
         visitor.public_redactor.remember((capability, visitor.csrf))
         self.visitors[capability] = visitor
@@ -397,7 +484,7 @@ class HostedRunner:
 
     def refresh_monitor(self):
         from remote_yam.operator_status import read_auto_queue
-        self.operator_auto_queue = read_auto_queue() if self.hardware_control and self.robot_id == "yam-1" else None
+        self.operator_auto_queue = (read_auto_queue(self.operator_status_origin) if self.operator_status_origin else read_auto_queue()) if self.hardware_control and self.robot_id == "yam-1" else None
         try:
             self.observation = self.monitor_api.get_robot_observation(self.robot_id)
         except Exception:
@@ -426,6 +513,7 @@ class HostedRunner:
             for visitor in list(self.visitors.values()):
                 with suppress(Exception):
                     await asyncio.to_thread(self.remember_runner, visitor)
+                    await asyncio.to_thread(self.remember_assessment_owner, visitor)
             now = time.monotonic()
             expired = [key for key, item in self.visitors.items()
                        if now - item.touched > self.idle_seconds or now - item.born > self.lifetime_seconds]
@@ -459,7 +547,7 @@ class HostedRunner:
                     await asyncio.gather(*(asyncio.to_thread(v.close) for v in visitors))
                     if self.cleanups:
                         await asyncio.gather(*self.cleanups)
-                    if not any(v.controller.busy() for v in visitors):
+                    if not self.retain_recordings and not any(v.controller.busy() for v in visitors):
                         shutil.rmtree(self.root, ignore_errors=True)
                     await send({"type": "lifespan.shutdown.complete"})
                     return
@@ -471,14 +559,15 @@ class HostedRunner:
             await self.http(scope, receive, send)
         except RequestError as exc:
             await self.json(send, exc.status, {"error": exc.message,
-                **({'subscription_setup': exc.setup} if exc.setup is not None else {})})
+                **({'subscription_setup': exc.setup} if exc.setup is not None else {}),
+                **({'guard_admission': exc.guard_admission} if exc.guard_admission is not None else {})})
         except (ConnectionError, asyncio.CancelledError):
             raise
         except Exception:
             # No raw exceptions: upstream errors can contain URLs or credentials.
             await self.json(send, 503, {"error": "The request could not be completed. Please try again."})
 
-    async def body(self, receive):
+    async def body(self, receive, *, max_bytes=24000):
         async def read():
             value = bytearray()
             while True:
@@ -486,7 +575,7 @@ class HostedRunner:
                 if event["type"] == "http.disconnect":
                     raise ConnectionError("Browser disconnected")
                 value.extend(event.get("body", b""))
-                if len(value) > 24000:
+                if len(value) > max_bytes:
                     raise RequestError(413, "Request is too large")
                 if not event.get("more_body"):
                     break
@@ -512,8 +601,24 @@ class HostedRunner:
             raise RequestError(421, "Unrecognized website host")
         if await self.public_extension(scope, receive, send, headers):
             return
-        if headers.get("sec-fetch-site") == "cross-site" and not (path == "/" and method == "GET"):
+        if headers.get("sec-fetch-site") == "cross-site" and not (path in {"/", "/research", "/research/", "/hosted_works", "/hosted_works/"} and method == "GET"):
             raise RequestError(403, "Open the runner directly to continue")
+        research_files = {"gallery.css": "text/css", "gallery.js": "text/javascript",
+            **{name + ".webp": "image/webp" for name in (
+                "clawmetry", "roboharness", "roboskills", "spotter", "embodiedevo", "memo", "agent-as-policy", "cag")}}
+        if method == "GET" and path in {"/research", "/research/"}:
+            await self.respond(send, 308, b"", "text/plain; charset=utf-8",
+                               [(b"location", b"/hosted_works/")])
+            return
+        if method == "GET" and path in {"/hosted_works", "/hosted_works/"}:
+            await self.respond(send, 200, (ROOT / "static/research/index.html").read_bytes(), "text/html; charset=utf-8")
+            return
+        if method == "GET" and path.startswith("/static/research/"):
+            name = path.removeprefix("/static/research/")
+            if name not in research_files:
+                raise RequestError(404, "Not found")
+            await self.respond(send, 200, (ROOT / "static/research" / name).read_bytes(), research_files[name])
+            return
         if method == "GET" and path == "/api/robots":
             await self.json(send, 200, {"selected": self.robot_id, "robots": [
                 {**{k: robot[k] for k in ("id", "name", "url")}, "hardware": robot.get("hardware", ""), "connected": self.robot_connected(robot["id"])} for robot in self.robots]})
@@ -521,10 +626,111 @@ class HostedRunner:
         if method == "GET" and path == "/static/manrope-variable.ttf":
             await self.respond(send, 200, (ROOT / "static/manrope-variable.ttf").read_bytes(), "font/ttf")
             return
-        if method == "GET" and path in {"/", "/static/hosted.js", "/static/replay-history.js", "/static/replay-progress.js", "/static/replay-email.js", "/static/reactions.js", "/static/model-picker.js", "/static/system-prompt.js", "/static/hosted.css", "/static/stream-health.js", "/static/hls.light.min.js", "/static/hls.min.js", "/static/robot-audio.js", "/static/robot-audio.css", "/static/observer-enhancement-worker.js"}:
+        if method == 'GET' and path == '/api/task-suggestions':
+            from remote_yam.task_suggestions import read_suggestions
+            try:
+                suggestions = await asyncio.to_thread(read_suggestions, self.robot_id)
+            except (OSError, ValueError, sqlite3.Error):
+                raise RequestError(503, 'Task suggestions are unavailable. You can still write your own task.') from None
+            await self.json(send, 200, {'robot_id': self.robot_id, 'suggestions': suggestions})
+            return
+        if method == "GET" and path in {"/", "/static/meeting.js", "/static/meeting.css", "/static/hosted.js", "/static/run-assessments.js", "/static/run-labels.js", "/static/run-data-chat.js", "/static/run-data-chat.css", "/static/task-cloud.js", "/static/replay-history.js", "/static/replay-progress.js", "/static/replay-email.js", "/static/reactions.js", "/static/model-picker.js", "/static/system-prompt.js", "/static/hosted.css", "/static/stream-health.js", "/static/live-viewers.js", "/static/hls.light.min.js", "/static/hls.min.js", "/static/robot-audio.js", "/static/robot-audio.css", "/static/observer-enhancement-worker.js"}:
             asset = ROOT / "static" / ("hosted.html" if path == "/" else path.rsplit("/", 1)[1])
             kind = "image/png" if path.endswith(".png") else "text/html" if path == "/" else "text/javascript" if path.endswith(".js") else "text/css"
             await self.respond(send, 200, (self.page() if path == "/" else asset.read_bytes()), kind if kind == "image/png" else kind + "; charset=utf-8")
+            return
+        integration_video = re.fullmatch(r'/api/integration-replays/(ep_[A-Za-z0-9_-]{1,100})/([0-9a-f]{64})\.mp4', path)
+        if method == 'GET' and integration_video:
+            video_reader = getattr(self.past_runs, 'video', None)
+            video = await asyncio.to_thread(video_reader, *integration_video.groups(), headers.get('range')) if video_reader else None
+            if video is None:
+                raise RequestError(404, 'Replay is not available')
+            status, body, extra = video
+            await self.respond(send, status, body, 'video/mp4', extra)
+            return
+        if method == 'GET' and path == '/api/run-labels':
+            # Public, read-only model predictions and imported human reviews.
+            # Never write these into runner-owned assessments or revision votes.
+            labels = ROOT / 'annotations' / 'run-labels.json'
+            data = json.loads(labels.read_text()) if labels.exists() else {'version': 1, 'runs': []}
+            query = parse_qs(scope.get('query_string', b'').decode())
+            if any(len(query.get(key, [])) > 1 for key in ('summary', 'episode_id', 'robot_id')) or query.get('summary', ['1'])[0] != '1':
+                raise RequestError(400, 'Invalid label query')
+            rows = data['runs']
+            for key in ('episode_id', 'robot_id'):
+                if key in query:
+                    rows = [row for row in rows if row.get(key) == query[key][0]]
+            if query.get('summary') == ['1']:
+                # Cloud colors need outcomes/provenance, not every video's evidence.
+                rows = [{'episode_id':row['episode_id'], 'robot_id':row['robot_id'],
+                         'auto_assessment':{key:row['auto_assessment'][key] for key in ('label', 'model')},
+                         'human_review':{'label':row['human_review']['label']} if row.get('human_review') else None}
+                        for row in rows]
+            await self.json(send, 200, dict(data, runs=rows))
+            return
+        if method == 'GET' and path == '/api/run-catalog':
+            from remote_yam.run_assessments import RunAssessments, score_models
+            from remote_yam.run_search import rank_runs, MAX_QUERY_LENGTH
+            from remote_yam.task_cloud import task_key
+            try:
+                query = parse_qs(scope.get('query_string', b'').decode())
+                offset = int(query.get('offset', ['0'])[0])
+                search = query.get('q', [''])[0].strip()
+                models = query.get('model', [])
+                view = query.get('view', ['table'])[0]
+                if not 0 <= offset <= 1000000 or len(search) > MAX_QUERY_LENGTH or view not in {'table', 'cloud'}:
+                    raise ValueError('Invalid catalog query')
+                if len(models) > 100 or any(len(m) > 128 or any(ord(c) < 32 for c in m) for m in models):
+                    raise ValueError('Invalid model filter')
+            except (ValueError, UnicodeError) as exc:
+                raise RequestError(400, str(exc) or 'Invalid catalog query') from None
+            try:
+                # Index all known tasks together, regardless of request filters.
+                catalog = await asyncio.to_thread(self.past_runs.page, metadata=True)
+                overlay = await asyncio.to_thread(self.run_assessments.summaries)
+                all_rows = catalog['runs']
+                rows = [dict(r, assessment=overlay.get(r['episode_id'], RunAssessments.summary()))
+                        for r in all_rows if (not query.get('robot_id') or r['robot_id'] == query['robot_id'][0])]
+                choices = sorted({r.get('model') or '__unrecorded__' for r in rows}, key=str.casefold)
+                if models:
+                    rows = [r for r in rows if (r.get('model') or '__unrecorded__') in models]
+                score_groups = rows + [{'model': model} for model in models
+                    if not any((r.get('model') or '__unrecorded__') == model for r in rows)]
+                if search:
+                    rows = rank_runs(rows, search)
+                scores = score_models(rows, groups=score_groups)
+                cloud = None
+                if view == 'cloud':
+                    await asyncio.to_thread(self.task_cloud.schedule, all_rows)
+                    cloud = await asyncio.to_thread(self.task_cloud.snapshot, all_rows)
+                    coordinates = cloud.pop('coordinates')
+                    speeds = await asyncio.to_thread(self.run_names.replay_speeds)
+                    for r in rows:
+                        r['task_id'] = task_key(r['prompt'])
+                        r['xyz'] = coordinates.get(r['task_id'])
+                        if r['episode_id'] in speeds:
+                            r['replay_speed'] = speeds[r['episode_id']]
+                limit = 10000 if view == 'cloud' else 12
+                selected = rows[:limit] if view == 'cloud' else rows[offset:offset+limit]
+                if view == 'table':
+                    selected = await asyncio.to_thread(self.past_runs.details_for, selected)
+                    names = await asyncio.to_thread(self.run_names.names)
+                    outcomes = await asyncio.to_thread(self.run_names.results)
+                    speeds = await asyncio.to_thread(self.run_names.replay_speeds)
+                    from remote_yam.past_runs import merge_run_result
+                    for row in selected:
+                        row['runner_name'] = names.get(row['episode_id'], row.get('runner_name') or 'Name not recorded')
+                        if row['episode_id'] in speeds:
+                            row['replay_speed'] = speeds[row['episode_id']]
+                        merge_run_result(row, outcomes.get(row['episode_id'], {}))
+                result = {'runs': selected, 'models': choices, 'scores': scores, 'total': len(rows),
+                          'next_offset': offset+len(selected) if view == 'table' and offset+len(selected) < len(rows) else None,
+                          'stale': catalog.get('stale', False), 'cloud': cloud,
+                          'source': getattr(self.past_runs, 'source', 'public'),
+                          'display_limit': limit, 'sampled': view == 'cloud' and len(rows) > limit}
+            except Exception:
+                raise RequestError(503, 'Run catalog is unavailable. Select Refresh to retry.') from None
+            await self.json(send, 200, result)
             return
         if method == 'GET' and path == '/api/run-comparisons':
             runs = await asyncio.to_thread(self.run_names.comparisons, self.robot_id)
@@ -564,8 +770,10 @@ class HostedRunner:
                 names = await asyncio.to_thread(self.run_names.names)
                 outcomes = await asyncio.to_thread(self.run_names.results)
                 replay_speeds = await asyncio.to_thread(self.run_names.replay_speeds)
+                assessments = await asyncio.to_thread(self.run_assessments.summaries)
                 for row in result['runs']:
-                    row['runner_name'] = names.get(row['episode_id'], 'Name not recorded')
+                    row['assessment'] = assessments.get(row['episode_id'], self.run_assessments.summary())
+                    row['runner_name'] = names.get(row['episode_id'], row.get('runner_name') or 'Name not recorded')
                     if row['episode_id'] in replay_speeds:
                         row['replay_speed'] = replay_speeds[row['episode_id']]
                     from remote_yam.past_runs import merge_run_result
@@ -613,7 +821,9 @@ class HostedRunner:
                                'claude': await asyncio.to_thread(subscription_status, 'claude'), 'claude_model': CLAUDE_MODEL}
             from remote_yam.system_prompts import catalog as system_prompt_catalog
             await self.json(send, 200, {**local_setup, **application_setup,
-                                      "system_prompts": system_prompt_catalog(self.joint_counts == (6,6)), "robot_id": self.robot_id, "video_stream": self.video_stream, "cameras": list(self.camera_names), "model_cameras": list(self.model_camera_names()), "joint_policy": self.joint_counts != (6,6), "claude_supported": self.hardware == "makerarm" or self.joint_counts in {(6,6), (5,5), (5,0)}, "csrf": visitor.csrf, "astra_enabled": bool(self.astra_endpoint), "groot_enabled": bool(self.groot_key_file), "groot_model": self.groot_model, "groot_label": self.groot_label,
+                                      "data_chat": {"available": self.data_chat is not None, "model": self.data_chat.model if self.data_chat else None},
+                                      "system_prompts": system_prompt_catalog(self.joint_counts == (6,6)), "robot_id": self.robot_id, "video_stream": self.video_stream, "cameras": list(self.camera_names), "model_cameras": list(self.model_camera_names()), "joint_policy": self.joint_counts != (6,6), "claude_supported": self.hardware == "makerarm" or self.joint_counts in {(6,6), (5,5), (5,0)}, "csrf": visitor.csrf, "astra_enabled": bool(self.astra_endpoint), "groot_enabled": bool(self.groot_key_file), "groot_model": self.groot_model, "groot_label": self.groot_label, "runpod_providers": self.runpod_providers, "custom_endpoint_enabled": True,
+                                      "custom_endpoint_profile": dict(robot_id=self.robot_id, joint_counts=list(self.joint_counts), cameras=list(self.model_camera_names()), action_dim=sum(count + 1 for count in self.joint_counts if count)),
                                       "simulation": self.simulation, "share_conversation": self.share_conversation,
                                       "dream_providers": self.dream_providers if self.dream_worker_ready() else {},
                                       **await self.chat_setup(visitor),
@@ -628,10 +838,81 @@ class HostedRunner:
         if method == "POST":
             if not secrets.compare_digest(headers.get("x-yam-runner-token", ""), visitor.csrf):
                 raise RequestError(403, "Invalid browser session token")
-            payload = await self.body(receive)
+            payload = await self.body(receive, max_bytes=600000 if path == '/api/run-data-chat' else 24000)
             if await self.action_extension(path, visitor, payload, cookie, send):
                 return
-            if path == "/api/my-runs":
+            if path == '/api/run-data-chat':
+                from remote_yam.run_data_chat import validate_payload, build_context, load_sources, DataChatUnavailable
+                from remote_yam.run_data_search import lookup_answer
+                try:
+                    question, data_scope, history = validate_payload(payload)
+                except ValueError as exc:
+                    raise RequestError(400, str(exc)) from None
+                if self.data_chat is None:
+                    raise RequestError(503, 'Data chat is not configured on this server. The run library and replays remain available.')
+                if visitor.data_chat_busy:
+                    raise RequestError(429, 'Please wait for the current answer before asking again.')
+                visitor.data_chat_busy = True
+                search_started = time.perf_counter()
+                try:
+                    sources, snapshot_age = await asyncio.to_thread(self.data_chat_sources.get,
+                        lambda: load_sources(self.past_runs, self.run_names, self.run_assessments,
+                            ROOT / 'annotations' / 'run-labels.json'))
+                    catalog, overlay, annotations = sources
+                    context = await asyncio.to_thread(build_context, catalog, overlay, annotations,
+                        data_scope, self.robot_id, question, history)
+                    # Recorded station identity must not be inferred from task text.
+                    context['source_snapshot_age_s'] = round(snapshot_age, 3)
+                    context['robot_names'] = {robot['id']: robot['name'] for robot in self.robots}
+                    context['library_context']['robot_name'] = context['robot_names'].get(self.robot_id, self.robot_id)
+                    context['robot_identity_basis'] = 'robot_id and robot_names identify the execution station; a task prompt can mention a different station.'
+                    if not context['counts']['total']:
+                        result = {'answer': 'No runs match this scope. Clear a filter or select a different box to discuss the data.',
+                            'citations': [], 'requested_model': self.data_chat.model, 'resolved_model': None}
+                    else:
+                        result = lookup_answer(context, question, history)
+                        if result is None:
+                            if time.monotonic() - visitor.last_data_chat < 3:
+                                raise RequestError(429, 'Please wait a moment before asking for another analysis.')
+                            visitor.last_data_chat = time.monotonic()
+                            result = await asyncio.to_thread(self.data_chat.answer, context, question, history)
+                    result['elapsed_ms'] = round((time.perf_counter() - search_started)*1000, 2)
+                    result['scope'] = {k:v for k,v in context.items() if k not in ('evidence','by_model','repeated_tasks')}
+                except ValueError as exc:
+                    raise RequestError(400, str(exc)) from None
+                except DataChatUnavailable as exc:
+                    raise RequestError(503, str(exc)) from None
+                except RequestError:
+                    raise
+                except Exception:
+                    raise RequestError(503, 'Run data is unavailable. Refresh the library and try again.') from None
+                finally:
+                    visitor.data_chat_busy = False
+            elif path == '/api/run-assessment':
+                from remote_yam.run_assessments import AssessmentConflict
+                eid, operation = payload.get('episode_id'), payload.get('operation', 'read')
+                if not isinstance(eid, str) or not re.fullmatch(r'ep_[A-Za-z0-9_-]{1,100}', eid):
+                    raise RequestError(400, 'Invalid episode ID')
+                try:
+                    await asyncio.to_thread(self.remember_runner, visitor)
+                    await asyncio.to_thread(self.remember_assessment_owner, visitor)
+                    if operation == 'assess':
+                        await asyncio.to_thread(self.run_assessments.assess, eid, payload.get('label'),
+                            payload.get('revision'), visitor.assessment_session, self.assessment_user(visitor))
+                    elif operation == 'vote':
+                        await asyncio.to_thread(self.run_assessments.vote, eid, payload.get('revision'),
+                            payload.get('vote'), visitor.assessment_session)
+                    elif operation != 'read':
+                        raise ValueError('Unknown assessment operation')
+                    result = await asyncio.to_thread(self.run_assessments.detail, eid,
+                        visitor.assessment_session, self.assessment_user(visitor))
+                except PermissionError as exc:
+                    raise RequestError(403, str(exc)) from None
+                except AssessmentConflict as exc:
+                    raise RequestError(409, str(exc)) from None
+                except ValueError as exc:
+                    raise RequestError(400, str(exc)) from None
+            elif path == "/api/my-runs":
                 try:
                     if 'email' in payload or 'episode_ids' in payload:
                         raise ValueError('Run history is limited to your current session')
@@ -647,9 +928,11 @@ class HostedRunner:
                     names = await asyncio.to_thread(self.run_names.names)
                     outcomes = await asyncio.to_thread(self.run_names.results)
                     replay_speeds = await asyncio.to_thread(self.run_names.replay_speeds)
+                    assessments = await asyncio.to_thread(self.run_assessments.summaries)
                     from remote_yam.past_runs import merge_run_result
                     for row in result['runs']:
-                        row['runner_name'] = names.get(row['episode_id'], 'Name not recorded')
+                        row['assessment'] = assessments.get(row['episode_id'], self.run_assessments.summary())
+                        row['runner_name'] = names.get(row['episode_id'], row.get('runner_name') or 'Name not recorded')
                         if row['episode_id'] in replay_speeds:
                             row['replay_speed'] = replay_speeds[row['episode_id']]
                         merge_run_result(row, outcomes.get(row['episode_id'], {}))
@@ -732,12 +1015,20 @@ class HostedRunner:
         if path == "/api/chat":
             await self.json(send, 200, await self.chat_snapshot(visitor))
         elif path == "/api/status":
+            now = time.monotonic()
+            if headers.get('x-yam-watching') == '1':
+                visitor.last_watched = now
             controller = visitor.controller
             if self.observation is not None:
                 controller.update_monitor_observation(self.observation)
             if self.queue is not None:
                 controller.update_queue_snapshot(self.queue)
             state = controller.status()
+            # A browser's existing session deduplicates its tabs. Hidden tabs
+            # must not clear a heartbeat sent by another visible tab.
+            state['live_viewer_count'] = sum(
+                not item.retired and now - item.last_watched < LIVE_VIEWER_SECONDS
+                for item in self.visitors.values())
             # Only the owner receives local setup instructions after a login expires
             # during a run. No subprocess or live request is made by status polling.
             state['subscription_setup'] = None
@@ -956,6 +1247,12 @@ class HostedRunner:
             if visitor.launches >= 20:
                 raise RequestError(429, 'This browser session reached its 20-run limit. Click Reset runs in the page footer to continue.')
             name, key, prompt, model = (payload.get(k, "") for k in ("provider", "api_key", "prompt", "model"))
+            from remote_yam.controller_executor import selected_executor
+            try:
+                controller_provider = selected_executor(payload.get('executor'), provider=name,
+                    model=model, robot_id=self.robot_id)
+            except ValueError as exc:
+                raise RequestError(400, str(exc)) from None
             fast_provider = name in ('openai', 'codex', 'anthropic', 'claude')
             response_speed = payload.get('response_speed', 'fast' if fast_provider else 'standard')
             if response_speed not in ('standard', 'fast'):
@@ -982,6 +1279,13 @@ class HostedRunner:
             duration = payload.get("run_duration_s", default_duration)
             if type(duration) is not int or not 60 <= duration <= maximum_duration:
                 raise RequestError(400, f"Choose a run duration from 1 to {maximum_duration // 60} minutes")
+            from remote_yam.cadence import trajectory_cadence
+            try:
+                cadence_hz = trajectory_cadence(payload.get('cadence_hz', 10))
+            except ValueError as exc:
+                raise RequestError(400, str(exc)) from None
+            if cadence_hz != 10 and name not in ('dream', 'dream_flash'):
+                raise RequestError(400, 'Configurable playback cadence is available for Dream runs')
             runner_name = payload.get('runner_name', 'Anonymous')
             try:
                 handles = social_handles(payload)
@@ -992,7 +1296,7 @@ class HostedRunner:
             if not isinstance(runner_name, str) or not 1 <= len(runner_name.strip()) <= 32 or any(ord(c) < 32 for c in runner_name):
                 raise RequestError(400, 'Enter a name of 1–32 characters')
             if name not in ({"local_raise_lower", "openai", "astra", "anthropic"} | ({"codex"} if self.local_codex else set())
-                            | ({"claude"} if self.local_claude else set())) | ({"groot"} if self.groot_key_file else set()) | set(self.extra_providers):
+                            | ({"claude"} if self.local_claude else set())) | ({"groot"} if self.groot_key_file else set()) | set(self.extra_providers) | {"custom_endpoint"} | ({'dream'} if controller_provider else set()):
                 raise RequestError(400, "Choose a supported provider")
             if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
                 raise RequestError(400, "Enter a task of up to 4,000 characters")
@@ -1004,16 +1308,18 @@ class HostedRunner:
                     model = selected_model(name, model)
                 except ValueError as exc:
                     raise RequestError(400, str(exc)) from None
-            if name not in ({"local_raise_lower", "codex", "claude", "groot"} | set(self.extra_providers)) and (not isinstance(key, str) or not 8 <= len(key) <= 4096 or any(ord(c) < 33 or ord(c) > 126 for c in key)):
+            if controller_provider is None and name not in ({"local_raise_lower", "codex", "claude", "groot", "custom_endpoint"} | set(self.extra_providers)) and (not isinstance(key, str) or not 8 <= len(key) <= 4096 or any(ord(c) < 33 or ord(c) > 126 for c in key)):
                 raise RequestError(400, "Enter your provider API key")
-            if payload.get("endpoint"):
+            if name == 'custom_endpoint' and (not isinstance(key, str) or len(key) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in key)):
+                raise RequestError(400, 'Enter a valid endpoint bearer key or leave it blank')
+            if name != 'custom_endpoint' and payload.get("endpoint"):
                 raise RequestError(400, "Provider endpoints are configured by the service")
             if name == "astra" and not self.astra_endpoint:
                 raise RequestError(400, "Astra is not configured on this service")
             if name == "local_raise_lower":
                 prompt = "Raise and lower both arms for three cycles."
             claude_supported = self.hardware == 'makerarm' or self.joint_counts in {(5,5), (5,0)}
-            if self.joint_counts != (6,6) and name not in ({'openai'} | ({'codex'} if self.local_codex else set())
+            if self.joint_counts != (6,6) and name not in ({'openai', 'custom_endpoint'} | ({'codex'} if self.local_codex else set())
                     | ({'anthropic'} | ({'claude'} if self.local_claude else set()) if claude_supported else set())):
                 raise RequestError(400, 'This robot requires an OpenAI or supported local Codex runner')
             if name in {'codex', 'claude'}:
@@ -1022,16 +1328,18 @@ class HostedRunner:
                 visitor.subscription_prompts[name] = setup['setup_prompt']
                 if not setup['ready']:
                     raise RequestError(409, f"{setup['label']} needs setup on this computer. " + setup['message'], setup=setup)
-            depth_route = self.resolve_api_depth_launch(prompt) if use_api_depth else None
-            launch_route = depth_route['route'] if depth_route else None
-            if launch_route and launch_route['actual_policy'] == 'astra':
-                use_api_depth = False
-            if use_api_depth:
-                if depth_route:
-                    provider = self.api_depth_provider_factory(name, key, model, visitor.directory,
-                        task=prompt, selected_executable=depth_route['program'])
-                else:
-                    provider = self.api_depth_provider_factory(name, key, model, visitor.directory)
+            if controller_provider is not None:
+                provider = controller_provider
+            elif use_api_depth:
+                provider = self.api_depth_provider_factory(name, key, model, visitor.directory)
+            elif name == 'custom_endpoint':
+                from remote_yam.custom_endpoint_policy import CustomEndpointAdapter
+                try:
+                    provider = CustomEndpointAdapter(key, endpoint=payload.get('endpoint'),
+                        camera_source=self.camera_source, robot_id=self.robot_id,
+                        joint_counts=self.joint_counts, camera_names=self.model_camera_names())
+                except ValueError as exc:
+                    raise RequestError(400, str(exc)) from None
             elif name in self.extra_providers:
                 provider = self.extra_providers[name](model, visitor.directory)
             elif name == 'groot':
@@ -1141,6 +1449,11 @@ class HostedRunner:
                 provider._urlopen = request.build_opener(NoRedirect).open
             if name in {'codex', 'claude'}:
                 provider.reasoning_effort = effort
+            configure_cadence = getattr(provider, 'configure_cadence', None)
+            if callable(configure_cadence):
+                configure_cadence(cadence_hz)
+            elif cadence_hz != 10:
+                raise RequestError(400, 'This executor does not support configurable cadence')
             if fast_provider:
                 provider.response_speed = response_speed
             try:
@@ -1152,8 +1465,6 @@ class HostedRunner:
                 raise RequestError(400, str(exc)) from None
             if provider_transform is not None:
                 provider = provider_transform(provider)
-            if launch_route:
-                provider.launch_route = launch_route
             visitor.public_redactor.remember((key,))
             visitor.last_launch = time.monotonic()
             visitor.launch_requested_at = time.time()
@@ -1161,7 +1472,9 @@ class HostedRunner:
             try:
                 visitor.controller._share_conversation = (self.share_conversation and share_conversation
                     and getattr(provider, "share_conversation", True))
-                visitor.controller._session_api.setup(payload, paid=paid)
+                # Record the effective model, including configured defaults/checkpoints.
+                visitor.controller._session_api.setup(
+                    {**payload, "model": provider.public_config().get("model") or model}, paid=paid)
                 visitor.controller.join_and_run(provider, prompt.strip(), run_duration_s=duration)
                 with visitor.controller._lock:
                     analytics_run = getattr(visitor.controller, "_analytics_run", None)
@@ -1171,8 +1484,6 @@ class HostedRunner:
                 visitor.runner_name = runner_name.strip()
                 visitor.runner_session_id = visitor.controller.status().get('session_id')
                 visitor.controller._interactions.add('runner', 'Run submitted by ' + visitor.runner_name, runner_name=visitor.runner_name)
-                if launch_route:
-                    visitor.controller._interactions.add('runner', launch_route['message'], launch_route=launch_route)
             except Exception:
                 if hasattr(provider, "_api_key"):
                     provider._api_key = ""
@@ -1189,11 +1500,10 @@ class HostedRunner:
                 print('[contacts] save_failed error_type=' + type(exc).__name__, flush=True)
                 visitor.controller._session_api.note(
                     'contact_save_failed', {'error_type': type(exc).__name__}, visitor.runner_session_id)
-            if not paid and name not in ({"local_raise_lower", "codex", "claude", "groot"} | set(self.extra_providers)):
+            if controller_provider is None and not paid and name not in ({"local_raise_lower", "codex", "claude", "groot", "custom_endpoint"} | set(self.extra_providers)):
                 visitor.saved_keys[name] = key
             current = visitor.controller.status()
             return {"ok": True, "saved_key_providers": sorted(visitor.saved_keys),
-                    **({'launch_route':launch_route} if launch_route else {}),
                     "attempt_id": current.get('attempt_id'), "status": current['status']}
 
     def steer(self, visitor, payload):
@@ -1246,7 +1556,7 @@ class HostedRunner:
         headers = [(b"content-type", content_type.encode()), (b"content-length", str(size).encode()),
                    (b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"),
                    (b"referrer-policy", b"no-referrer"),
-                   (b"content-security-policy", b"default-src 'none'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; img-src 'self' https://*.google-analytics.com https://www.googletagmanager.com; media-src https://huggingface.co https://*.huggingface.co https://*.hf.co; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")]
+                   (b"content-security-policy", b"default-src 'none'; script-src 'self' https://www.googletagmanager.com; style-src 'self'; font-src 'self'; connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; img-src 'self' https://*.google-analytics.com https://www.googletagmanager.com; media-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")]
         if self.secure:
             headers.append((b"strict-transport-security", b"max-age=31536000"))
         await send({"type": "http.response.start", "status": status, "headers": headers + list(extra)})

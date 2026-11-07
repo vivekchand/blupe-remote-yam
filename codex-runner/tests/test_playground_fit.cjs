@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname,'../static/hosted.js'),'utf8');
 const fit = source.slice(source.indexOf('  function fitCameras()'),source.indexOf('  const sizing = new ResizeObserver(fitCameras)'));
 
-function harness() {
+function harness({wrappingFooter=false}={}) {
   const values = new Map();
   const viewer={dataset:{layout:'observer-focus'}};
   const window={innerWidth:1440,innerHeight:650,scrollY:0};
@@ -18,9 +18,10 @@ function harness() {
     get:()=>values.get('height'),
     set:value=>{values.set('height',value);workspace.clientHeight=parseFloat(value);},
   });
+  const footer={get offsetHeight(){return wrappingFooter ? (parseFloat(values.get('--console-camera-width') || '1082') > 850 ? 57 : 102) : 24;}};
   const context={window,workspace,visuals:{clientWidth:354},
     $:id=>id==='liveViewer' ? viewer : {offsetHeight:21},
-    document:{querySelector:()=>({offsetHeight:24}),getElementById:()=>({offsetHeight:56})},
+    document:{querySelector:()=>footer,getElementById:()=>({offsetHeight:56})},
   };
   vm.runInNewContext(fit+'\nthis.fit=fitCameras;',context);
   return {window,workspace,viewer,values,fit:context.fit};
@@ -51,4 +52,17 @@ test('phone cameras remain above chat and discard desktop fixed sizing',()=>{
   assert.equal(h.values.has('--console-camera-width'),false);
   assert.equal(h.viewer.dataset.detailLayout,'below');
   assert(parseFloat(h.values.get('--console-camera-height'))<300);
+});
+
+
+test('wrapped status footer cannot flip camera arrangement on repeated resize callbacks',()=>{
+  const h=harness({wrappingFooter:true});
+  h.window.innerWidth=1512;h.window.innerHeight=770;
+  h.workspace.clientWidth=1464;h.workspace.documentTop=215.390625;
+  const states=[];
+  for(let i=0;i<24;i++){
+    h.fit();states.push([h.viewer.dataset.detailLayout,h.values.get('--console-camera-width')].join(':'));
+  }
+  assert.equal(new Set(states.slice(-12)).size,1,'layout must settle instead of alternating as the footer wraps');
+  assert(parseFloat(h.values.get('--console-camera-width'))<=1464-366-16);
 });

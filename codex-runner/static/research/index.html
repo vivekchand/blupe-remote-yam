@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore research websites hosted on BluPe. Preview each project and open its workspace.">
+  <title>Hosted Works · BluPe</title>
+  <link rel="stylesheet" href="/static/research/gallery.css?v=a3c272903b247e4f">
+  <script src="/static/research/gallery.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#works">Skip to websites</a>
+  <header class="siteHeader">
+    <a class="brand" href="/">BluPe</a>
+    <nav aria-label="Main navigation">
+      <a href="/">Robot room</a>
+      <a href="https://blupe.io/docs/robot-api/" target="_blank" rel="noopener noreferrer">API</a>
+      <a href="/hosted_works/" aria-current="page">Hosted Works</a>
+    </nav>
+  </header>
+  <main id="works">
+    <div class="galleryHeading">
+      <h1>Hosted Works</h1>
+      <p>Find research on BluPe.</p>
+      <div class="researchLinks">
+        <a href="mailto:info@blupe.io?subject=Host%20my%20method%20on%20BluPe">Ask BluPe to host your method</a>
+        <a href="https://github.com/andlyu/blupe-remote-bots/blob/main/codex-runner/integration-harness/README.md" target="_blank" rel="noopener noreferrer">Harness for integrating our method</a>
+      </div>
+    </div>
+    <ul class="gallery" aria-label="Research websites">
+      <li><a class="work" href="https://playground.clawmetry.com/" target="_blank" rel="noopener noreferrer" data-preview>
+        <div class="thumbnail"><img src="/static/research/clawmetry.webp" width="1200" height="562" alt="ClawMetry robot move log website" fetchpriority="high"><span class="previewHint" aria-hidden="true">Preview website</span></div>
+        <h2>ClawMetry</h2><p>Robot move logs and run evidence</p>
+      </a></li>
+      <li><a class="work" href="https://spotter.54.209.185.15.sslip.io/" target="_blank" rel="noopener noreferrer" data-preview>
+        <div class="thumbnail"><img src="/static/research/spotter.webp" width="1200" height="562" alt="Spotter on BluPe website"><span class="previewHint" aria-hidden="true">Preview website</span></div>
+        <h2>Spotter</h2><p>Policy supervision and failure repair</p>
+      </a></li>
+      <li><a class="work" href="https://cag-molmoact-blupe.andlyu.chatgpt.site/" target="_blank" rel="noopener noreferrer" data-preview>
+        <div class="thumbnail"><img src="/static/research/cag.webp" width="1200" height="562" alt="Completion-Aware Guidance and MolmoAct2 website" loading="lazy"><span class="previewHint" aria-hidden="true">Preview website</span></div>
+        <h2>Completion-Aware Guidance</h2><p>MolmoAct2 attention experiment</p>
+      </a></li>
+    </ul>
+    <footer>Independent BluPe integrations. Previews are website snapshots; visit each site for its current status and results.</footer>
+  </main>
+  <dialog id="preview" aria-labelledby="previewTitle" aria-describedby="previewDescription">
+    <div class="previewToolbar">
+      <div><h2 id="previewTitle"></h2><p id="previewDescription"></p></div>
+      <button class="closePreview" type="button" aria-label="Close preview" autofocus><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="previewImage"><img id="previewImage" alt=""></div>
+    <div class="previewFooter"><span>Website preview · November 6, 2026</span><a id="visitWebsite" class="visitWebsite" target="_blank" rel="noopener noreferrer">Visit website <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a></div>
+  </dialog>
+</body>
+</html>

@@ -4,37 +4,116 @@
 #clawmetryMotionTab{font-size:inherit}#clawmetryMotionTab[aria-pressed=true]{color:#386388}.cm-motion-panel{color:var(--ink,#18251e);font-size:13px;line-height:1.5;min-height:0;display:flex;flex-direction:column}.cm-motion-panel .statusHeader h2{color:#386388}.cm-motion-panel .help{font-size:11px;color:var(--muted,#626c64);margin:6px 0 10px;max-width:92ch}.cm-motion-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1 1 auto;min-height:120px;max-height:46vh;font-variant-numeric:tabular-nums;border-top:1px solid var(--line,#cecfc4)}.cm-motion-list li{display:grid;grid-template-columns:74px 1fr;gap:2px 10px;padding:6px 2px;border-bottom:1px solid var(--line,#cecfc4);font-size:12px}.cm-motion-list time{color:var(--muted,#626c64);font-size:11px}.cm-motion-text{min-width:0;overflow-wrap:anywhere}.cm-motion-numbers{grid-column:2;color:var(--muted,#626c64);font-size:11px;overflow-wrap:anywhere}.cm-motion-list li[data-kind^=packet_]{border-left:2px solid #50779a;padding-left:8px}.cm-motion-list li[data-kind=packet_progress]{border-left-color:#386388}.cm-motion-list li[data-kind=packet_error],.cm-motion-list li[data-kind=tool_error],.cm-motion-list li[data-kind=feedback_timeout]{border-left:2px solid #9b622d;padding-left:8px}.cm-motion-list li[data-kind=observation]{border-left:2px solid #cecfc4;padding-left:8px}.cm-motion-panel .cm-evidence-limits{margin-top:12px}.cm-motion-panel :focus-visible{outline:2px solid #50779a;outline-offset:3px}@media(max-width:600px){.cm-motion-list li{grid-template-columns:1fr;gap:1px}.cm-motion-numbers{grid-column:1}.cm-motion-list{max-height:52vh}}
 /* Evidence is a section of the move-log tab, not a second panel on the page. */
 .cm-motion-panel .cm-evidence-widget{margin:12px 0 0;border-radius:8px}.cm-motion-panel .cm-evidence-widget>summary{min-height:38px;padding:9px 12px}.cm-motion-panel .cm-evidence-content{padding:3px 12px 12px}.cm-motion-panel .cm-evidence-grid{margin:12px 0}.cm-motion-detail{margin-left:auto;font-size:11px;color:#386388;text-decoration:underline;white-space:nowrap}.cm-motion-detail-note{margin-left:auto;font-size:10px;color:var(--muted,#626c64);max-width:34ch;line-height:1.35;text-align:right}.cm-motion-panel .statusHeader{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-/* ClawMetry's own dark surface inside BluPe's light page. Tokens are the
-   dashboard's dark palette, redeclared locally so nothing outside the panel
-   changes. The scope is one id: no upstream selector is restyled. */
-#clawmetryMotionPanel{--cm-bg:#0b0f14;--cm-surface:#121820;--cm-raised:#151d28;--cm-line:#273243;--cm-line-soft:#1f2937;--cm-ink:#e6edf5;--cm-ink-2:#c1cad6;--cm-muted:#7c8a9d;--cm-accent:#60a5fa;--cm-left:#7dd3fc;--cm-right:#fbbf24;--cm-error:#f87171;background:var(--cm-surface);border:1px solid var(--cm-line);color:var(--cm-ink);border-radius:10px;padding:14px 16px 16px;box-shadow:0 1px 3px rgba(0,0,0,.4)}
-#clawmetryMotionPanel .statusHeader h2{color:var(--cm-ink);font-size:14px;letter-spacing:-.2px}
-#clawmetryMotionPanel .tag{background:var(--cm-raised);border:1px solid var(--cm-line);color:var(--cm-ink-2);border-radius:999px;padding:2px 9px;font-size:11px}
-#clawmetryMotionPanel .help,#clawmetryMotionPanel .cm-evidence-limits,#clawmetryMotionPanel .cm-evidence-intro,#clawmetryMotionPanel .cm-motion-numbers,#clawmetryMotionPanel .cm-motion-detail-note,#clawmetryMotionPanel time{color:var(--cm-muted)}
-#clawmetryMotionPanel .cm-motion-list{border-top:1px solid var(--cm-line);background:var(--cm-bg);border-radius:8px;padding:2px 10px}
-#clawmetryMotionPanel .cm-motion-list li{border-bottom:1px solid var(--cm-line-soft);color:var(--cm-ink-2)}
-#clawmetryMotionPanel .cm-motion-list li:last-child{border-bottom:0}
-#clawmetryMotionPanel .cm-motion-list li[data-kind^=packet_]{border-left:2px solid var(--cm-accent)}
-#clawmetryMotionPanel .cm-motion-list li[data-kind=packet_progress]{border-left-color:var(--cm-left)}
-#clawmetryMotionPanel .cm-motion-list li[data-kind=packet_error],#clawmetryMotionPanel .cm-motion-list li[data-kind=tool_error],#clawmetryMotionPanel .cm-motion-list li[data-kind=feedback_timeout]{border-left:2px solid var(--cm-error)}
-#clawmetryMotionPanel .cm-motion-list li[data-kind=observation]{border-left:2px solid var(--cm-line)}
-#clawmetryMotionPanel .cm-motion-detail{color:var(--cm-accent)}
-#clawmetryMotionPanel .cm-evidence-widget{background:var(--cm-raised);border:1px solid var(--cm-line);color:var(--cm-ink)}
-#clawmetryMotionPanel .cm-evidence-widget>summary{color:var(--cm-ink)}
-#clawmetryMotionPanel .cm-evidence-widget>summary:before,#clawmetryMotionPanel .cm-evidence-status,#clawmetryMotionPanel .cm-evidence-identities>summary,#clawmetryMotionPanel .cm-evidence-identities dt{color:var(--cm-muted)}
-#clawmetryMotionPanel .cm-evidence-content{border-top:1px solid var(--cm-line)}
-#clawmetryMotionPanel .cm-evidence-feedback{border-top:1px solid var(--cm-line)}
-#clawmetryMotionPanel th,#clawmetryMotionPanel td{border-bottom:1px solid var(--cm-line-soft);color:var(--cm-ink-2)}
-#clawmetryMotionPanel td[data-arm=left]{color:var(--cm-left)}
-#clawmetryMotionPanel td[data-arm=right]{color:var(--cm-right)}
-#clawmetryMotionPanel button{background:#1d2632;border:1px solid var(--cm-line);color:var(--cm-ink);border-radius:7px}
-#clawmetryMotionPanel button:hover:not(:disabled){background:#263344}
-#clawmetryMotionPanel button:disabled{opacity:.45}
-#clawmetryMotionPanel input[type=range]{accent-color:var(--cm-accent)}
-#clawmetryMotionPanel :focus-visible{outline:2px solid var(--cm-accent);outline-offset:3px}
-/* Collaboration lockup */
-.cm-brand{display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid var(--cm-line)}
+/* Collaboration lockup inherits the existing meeting palette. */
+.cm-brand{display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid var(--line,#cecfc4)}
 .cm-brand-mark{height:21px;width:auto;display:block}
-.cm-brand-x{color:var(--cm-muted);font-size:13px;line-height:1}
-.cm-brand-blupe{font-family:Manrope,system-ui,-apple-system,sans-serif;font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--cm-ink);line-height:1}
-@media(max-width:600px){.cm-brand-mark{height:18px}.cm-brand-blupe{font-size:15px}#clawmetryMotionPanel{padding:12px}}
+.cm-brand-x{color:var(--muted,#626c64);font-size:13px;line-height:1}
+.cm-brand-blupe{font-family:inherit;font-weight:800;font-size:17px;letter-spacing:-.5px;color:inherit;line-height:1}
+@media(max-width:600px){.cm-brand-mark{height:18px}.cm-brand-blupe{font-size:15px}}
+
+/* One scroll owner includes our evidence and the existing native assessment.
+   The source assessment node/handlers are restored when this tab is left. */
+#clawmetryMotionPanel.cm-motion-panel{flex:1 1 0;min-height:0;max-height:100%;overflow:hidden;padding:0;border:0;border-radius:0;background:#111b21;color:#e9edef}
+#clawmetryMotionPanel>.cm-brand{flex:none;margin:0;padding:10px 14px 7px;gap:8px;border:0}
+#clawmetryMotionPanel .cm-brand-mark{height:17px}
+#clawmetryMotionPanel .cm-brand-blupe{font-size:14px}
+#clawmetryMotionPanel>.statusHeader{flex:none;margin:0;padding:0 14px 10px;gap:8px;border-bottom:1px solid #2a3942}
+#clawmetryMotionPanel>.statusHeader h2{margin:0;color:#e9edef;font-size:15px}
+#clawmetryMotionPanel .cm-run-phase{font-size:11px;color:#aebac1;line-height:1.3;max-width:24ch;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-motion-detail{margin-left:auto;color:#7ce0c3;background:#1d3736;border-radius:6px;padding:6px 9px;font-size:12px;text-decoration:none}
+#clawmetryMotionPanel .cm-motion-detail:focus-visible{outline:2px solid #00a884;outline-offset:2px}
+#clawmetryMotionPanel #cm-trust-scroll{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;padding:12px 14px 16px;scrollbar-gutter:stable}
+#clawmetryMotionPanel .cm-motion-detail-note{max-width:none;margin:0 0 12px;text-align:left;font-size:12px}
+#clawmetryMotionPanel .cm-run-summary{padding:0 0 14px;border-bottom:1px solid #2a3942}
+#clawmetryMotionPanel .cm-run-state{margin:0 0 5px;font-size:18px;font-weight:600;line-height:1.35;color:#e9edef}
+#clawmetryMotionPanel .cm-run-task{margin:0 0 7px;font-size:13px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-trust-explanation,#clawmetryMotionPanel .cm-guard-explanation{margin:7px 0;color:#aebac1;font-size:12px;line-height:1.5}
+#clawmetryMotionPanel .cm-trust-facts{display:grid;grid-template-columns:1fr;gap:3px;margin:12px 0 0;font-size:12px}
+#clawmetryMotionPanel .cm-trust-facts dt{margin-top:8px;color:#aebac1;font-size:11px}
+#clawmetryMotionPanel .cm-trust-facts dd{margin:0;color:#e9edef;overflow-wrap:anywhere;line-height:1.5}
+#clawmetryMotionPanel #cm-guard-state{font-size:14px;font-weight:600}
+#clawmetryMotionPanel #cm-guard-state[data-state=held]{color:#f28b82}
+#clawmetryMotionPanel .cm-recent-section{padding:14px 0;border-bottom:1px solid #2a3942}
+#clawmetryMotionPanel .cm-recent-section h3{margin:0 0 9px;font-size:13px;color:#e9edef}
+#clawmetryMotionPanel .cm-recent-events{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+#clawmetryMotionPanel .cm-recent-events li{display:grid;gap:2px;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-recent-events time{color:#aebac1;font-size:10px;font-variant-numeric:tabular-nums}
+#clawmetryMotionPanel .cm-technical-activity{margin:12px 0 0}
+#clawmetryMotionPanel .cm-technical-activity>summary{padding:8px 0;cursor:pointer;font-size:12px;color:#aebac1}
+#clawmetryMotionPanel .cm-motion-list{display:block;overflow:visible;min-height:0;max-height:none;flex:none}
+#clawmetryMotionPanel .cm-motion-list li{font-size:11px;grid-template-columns:60px minmax(0,1fr)}
+#clawmetryMotionPanel .cm-operator-assessment{margin-top:14px;border-top:1px solid #2a3942;padding-top:10px}
+#clawmetryMotionPanel .cm-assessment-caption{font-size:12px;line-height:1.5;color:#aebac1;margin:0 0 4px}
+#clawmetryMotionPanel .cm-evidence-content{max-width:100%}
+#clawmetryMotionPanel .cm-evidence-grid{grid-template-columns:1fr;gap:12px}
+#clawmetryMotionPanel .cm-evidence-widget>summary{flex-wrap:wrap}
+#clawmetryMotionPanel .cm-evidence-status{margin-left:0}
+@media(prefers-reduced-motion:reduce){#clawmetryMotionPanel *{scroll-behavior:auto!important}}
+
+/* Optional review sizing leaves the native camera grid and controls intact. */
+#clawmetryMotionPanel>.cm-review-tools{display:flex;align-items:center;gap:12px;flex:none;padding:8px 14px;border-bottom:1px solid #2a3942}
+#clawmetryMotionPanel .cm-review-expand{flex:none;min-height:34px;padding:6px 10px;border:1px solid #3b4a54;border-radius:6px;background:#202c33;color:#7ce0c3;font:inherit;font-size:12px;cursor:pointer}
+#clawmetryMotionPanel .cm-resize-hint{font-size:11px;line-height:1.4;color:#aebac1}
+#clawmetryMotionPanel.cm-review-expanded{position:fixed;z-index:120;top:16px;right:16px;width:min(720px,calc(100vw - 32px));height:min(800px,calc(100dvh - 112px));min-width:min(360px,calc(100vw - 32px));min-height:min(360px,calc(100dvh - 112px));max-width:calc(100vw - 32px);max-height:calc(100dvh - 112px);resize:both;box-sizing:border-box;border:1px solid #3b4a54;border-radius:12px;box-shadow:0 12px 48px #0005;overflow:hidden}
+#clawmetryMotionPanel.cm-review-expanded #cm-trust-scroll{padding-bottom:26px}
+@media(max-width:600px){#clawmetryMotionPanel.cm-review-expanded{top:8px;right:8px;width:calc(100vw - 16px);height:calc(100dvh - 104px);max-width:calc(100vw - 16px);max-height:calc(100dvh - 104px);min-height:min(360px,calc(100dvh - 104px));min-width:min(320px,calc(100vw - 16px))}#clawmetryMotionPanel .cm-review-tools{flex-wrap:wrap;gap:6px}}
+
+/* The result leads the one scroll body; size controls stay reachable. */
+#clawmetryMotionPanel .cm-run-outcome{flex:none;margin:0;padding:10px 14px;background:#202c33;border-bottom:1px solid #2a3942;border-left:4px solid #8696a0}
+#clawmetryMotionPanel .cm-run-outcome[data-outcome=blocked]{background:#332d20;border-left-color:#e9b35f}
+#clawmetryMotionPanel .cm-run-outcome[data-outcome=failed]{background:#352327;border-left-color:#f28b82}
+#clawmetryMotionPanel .cm-run-outcome h3{margin:0 0 3px;font-size:18px;line-height:1.3;color:#e9edef}
+#clawmetryMotionPanel .cm-run-outcome p{margin:3px 0 0;font-size:12px;line-height:1.45;color:#d1d7db;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-run-outcome .cm-outcome-rule{font-size:11px;color:#aebac1}
+
+.cm-run-outcome .cm-outcome-context {font-size:11px;font-weight:600;letter-spacing:.03em;margin:0 0 3px;}
+
+/* A calm chat surface: instruction, task, then short chronological updates. */
+#clawmetryMotionPanel{--paper:#111b21;--ink:#e9edef;--muted:#aebac1;--line:#2a3942;color-scheme:dark}
+#clawmetryMotionPanel [hidden]{display:none!important}
+#clawmetryMotionPanel>.cm-brand{padding-top:12px;padding-bottom:8px}
+#clawmetryMotionPanel>.statusHeader{align-items:center;padding-bottom:12px}
+#clawmetryMotionPanel>.statusHeader h2{font-size:17px;letter-spacing:-.2px}
+#clawmetryMotionPanel .cm-run-phase{font-size:11px;flex:1;max-width:none}
+#clawmetryMotionPanel .cm-sessions-link{color:#aebac1;font-size:12px;text-decoration:none}
+#clawmetryMotionPanel .cm-sessions-link:hover{text-decoration:underline;color:#e9edef}
+#clawmetryMotionPanel .cm-motion-detail{order:3;width:100%;box-sizing:border-box;text-align:center;font-size:13px;font-weight:600;padding:8px 12px}
+#clawmetryMotionPanel>.cm-review-tools{padding:5px 14px;gap:8px}
+#clawmetryMotionPanel .cm-review-expand{min-height:28px;border:0;background:transparent;color:#aebac1;padding:3px 0;font-size:11px}
+#clawmetryMotionPanel .cm-resize-hint{font-size:10px}
+#clawmetryMotionPanel .cm-run-outcome{padding:10px 12px;margin-bottom:12px;border-radius:8px;border-bottom:0}
+#clawmetryMotionPanel .cm-run-outcome h3{font-size:16px}
+#clawmetryMotionPanel .cm-recent-section{border:0;padding:16px 0 6px}
+#clawmetryMotionPanel .cm-live-task{font-size:14px;line-height:1.5;font-weight:500;margin:0 0 12px;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-recent-events{gap:8px}
+#clawmetryMotionPanel .cm-recent-events li{justify-self:start;max-width:92%;box-sizing:border-box;border-radius:0 10px 10px 10px;padding:9px 12px;background:#202c33;color:#e9edef;font-size:13px;line-height:1.45}
+#clawmetryMotionPanel .cm-recent-events li[data-kind=packet_error],#clawmetryMotionPanel .cm-recent-events li[data-kind=tool_error]{border-left:2px solid #f28b82}
+#clawmetryMotionPanel .cm-recent-events time{font-size:10px;text-align:right;color:#aebac1}
+#clawmetryMotionPanel .cm-activity-empty{font-size:13px;line-height:1.6;color:#aebac1;margin:4px 0 16px;max-width:32ch}
+#clawmetryMotionPanel .cm-guard-notice{font-size:12px;border-left:2px solid #00a884;padding:7px 10px;margin:0 0 12px;background:#18272c;border-radius:0 6px 6px 0}
+#clawmetryMotionPanel .cm-guard-notice p{color:#aebac1;font-size:12px;line-height:1.5;margin:3px 0 0}
+#clawmetryMotionPanel .cm-guard-notice p:empty{display:none}
+#clawmetryMotionPanel .cm-technical-activity{border-top:1px solid #2a3942;margin-top:12px;padding-top:3px}
+#clawmetryMotionPanel .cm-run-summary{padding-top:10px}
+#clawmetryMotionPanel .cm-run-summary .cm-run-state{font-size:14px}
+#clawmetryMotionPanel .cm-evidence-widget>summary strong{color:#7ce0c3}
+#clawmetryMotionPanel a{overflow-wrap:anywhere}
+#clawmetryMotionTab[aria-pressed=true]{background:#1d3736;color:#7ce0c3}
+
+/* Scope the surrounding activity header to our selected pane only. */
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])){background:#111b21;color:#e9edef}
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])) .taskChatHeading{background:#111b21;color:#e9edef;padding-block:6px}
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])) #meetingClosePanel{color:#aebac1}
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])) .watchToolbar{background:#111b21;padding-block:2px;border-bottom:1px solid #2a3942}
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])) .conversationModes button{color:#aebac1}
+.meetingConsole .meetingRoom #meetingTaskPanel:has(>#clawmetryMotionPanel:not([hidden])) .conversationModes button[aria-pressed=true]{color:#7ce0c3;background:#1d3736}
+#clawmetryMotionPanel .cm-recent-section{padding-top:4px}
+#clawmetryMotionPanel .cm-guard-editor-slot{border-top:1px solid #2a3942;padding-top:12px;margin-top:10px}
+#clawmetryMotionPanel .cm-guard-editor{padding:0}
+#clawmetryMotionPanel>.cm-review-tools{padding-block:2px}
+#clawmetryMotionPanel>.cm-brand .cm-review-expand{margin-left:auto;font-size:11px}
+#clawmetryMotionPanel .cm-activity-empty{max-width:none;margin-bottom:6px}
+#clawmetryMotionPanel.cm-motion-panel{position:relative}
+#clawmetryMotionPanel>.cm-review-expand{position:absolute;top:7px;right:14px;font-size:11px}
+#clawmetryMotionPanel.cm-review-expanded{position:fixed}
+#clawmetryMotionPanel>.cm-brand{padding-right:112px}

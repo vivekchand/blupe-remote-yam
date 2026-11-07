@@ -2,7 +2,7 @@
 set -eu
 
 PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# ASPIRE setup provides a complete native environment for the UI too.
+# Use an explicitly selected Python environment when supplied.
 if [ -n "${YAM_RUNNER_PYTHON:-}" ]; then
   exec "$YAM_RUNNER_PYTHON" "$PROJECT_ROOT/run.py" "$@"
 fi
@@ -12,7 +12,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   python3 -m venv "$VENV"
 fi
 
-if ! "$VENV/bin/python" -c 'import mujoco, numpy, websocket, uvicorn' >/dev/null 2>&1; then
+if ! "$VENV/bin/python" -c 'import mujoco, numpy, websocket, uvicorn, sentence_transformers; from importlib.metadata import version; assert version("umap-learn") == "0.5.8" and version("numba") == "0.68.0"' >/dev/null 2>&1; then
   "$VENV/bin/python" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/requirements.txt"
 fi
 

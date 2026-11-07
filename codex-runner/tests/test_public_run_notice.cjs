@@ -6,7 +6,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../static/h
 const helper = source.slice(source.indexOf('  function renderPublicRunNotice('), source.indexOf('  function render(state)'));
 function fixture({chat=null,live=null}={}) {
   const element = {hidden:true, textContent:'', dataset:{}};
-  const context = vm.createContext({$: id => id === 'aspireTaskPanel' ? chat : element,renderCurrentConversation:{lastRun:live}});
+  const context = vm.createContext({$: id => element,renderCurrentConversation:{lastRun:live}});
   vm.runInContext(helper,context);
   return {element, render:(state,failure) => context.renderPublicRunNotice(state,failure)};
 }
@@ -51,29 +51,13 @@ test('terminal run cannot retain a recovery warning and robot faults stay errors
 });
 test('camera notice uses the same specific failure reason as task progress and Run', () => {
   const {element,render}=fixture();
-  const reason='AspireNotReady: Reconciled ASPIRE feedback changed lease/cursor';
+  const reason='KinematicsNotReady: Reconciled robot feedback changed lease/cursor';
   render({public_run:{status:'stopped',error:'The run encountered a model or runner error.'}}, {reason});
   assert.equal(element.dataset.tone,'error');
-  assert.match(element.textContent,/run error: AspireNotReady/);
+  assert.match(element.textContent,/run error: KinematicsNotReady/);
   assert.doesNotMatch(element.textContent,/model or runner error/);
   assert.doesNotThrow(()=>render({}, {reason}),'rejected launches may not have a public run');
 });
-
-test('chat failures suppress their public duplicate while retaining unrelated errors and robot faults', () => {
-  const failure={label:'Task failed',reason:'RuntimeError: exact failure',task:'Place the block.'};
-  const chat={hidden:false,dataset:{enabled:'true',failureKey:JSON.stringify(failure)}};
-  const {element,render}=fixture({chat,live:{attempt_id:'current'}});
-  render({public_run:{attempt_id:'current',status:'stopped',error:'The run encountered a model or runner error.'}},failure);
-  assert.equal(element.hidden,true);
-  assert.equal(element.textContent,'');
-  render({public_run:{attempt_id:'current',status:'stopped',error:failure.reason},robot_fault:'Joint fault'},failure);
-  assert.equal(element.hidden,false);
-  assert.equal(element.textContent,'Robot error: Joint fault');
-  render({public_run:{attempt_id:'another',status:'stopped',error:'Unrelated failure'}},failure);
-  assert.equal(element.hidden,false);
-  assert.match(element.textContent,/Unrelated failure/);
-});
-
 
 test('render uses the tested notice helper and a specific public reason beats a generic task error', () => {
   assert.match(source,/renderPublicRunNotice\(state, taskFailure\)/);
@@ -86,15 +70,15 @@ test('render uses the tested notice helper and a specific public reason beats a 
 
 
 test('owner task view uses the public reason for the same attempt and ignores stale public errors', () => {
-  const helpers=source.slice(source.indexOf('function aspireLiveTask('),source.indexOf('function aspireElapsed('));
-  const context=vm.createContext({aspireSharedRun:run=>run});vm.runInContext(helpers,context);
+  const helpers=source.slice(source.indexOf('function currentTaskRun('),source.indexOf('// End of shared task helpers.'));
+  const context=vm.createContext({sharedTaskRun:run=>run});vm.runInContext(helpers,context);
   const run={attempt_id:'current',status:'failed',error:'Robot initialization was blocked by queue/API ownership.'};
   const state={attempt_id:'current',status:'failed',error:'RuntimeError: private payload'};
-  const shown=context.taskRunFailure(context.aspireLiveTask(run,state));
+  const shown=context.taskRunFailure(context.currentTaskRun(run,state));
   assert.equal(shown.reason,run.error);
   assert.doesNotMatch(shown.reason,/private/);
   const old={...run,attempt_id:'old'};
-  assert.equal(context.aspireLiveTask(old,state).error,old.error);
+  assert.equal(context.currentTaskRun(old,state).error,old.error);
 });
 
 test('legacy generic messages never replace a recorded cause or invent one', () => {
@@ -105,7 +89,36 @@ test('legacy generic messages never replace a recorded cause or invent one', () 
   assert.doesNotMatch(element.textContent,/model or runner error/);
   render({public_run:{runner_name:'andrew',status:'stopped',error:'RuntimeError: Dream preparation cancelled'}});
   assert.equal(element.textContent,'andrew — run error: RuntimeError: Dream preparation cancelled');
-  const helpers=source.slice(source.indexOf('function aspireLiveTask('),source.indexOf('function aspireElapsed('));
-  const context=vm.createContext({aspireSharedRun:run=>run});vm.runInContext(helpers,context);
+  const helpers=source.slice(source.indexOf('function currentTaskRun('),source.indexOf('// End of shared task helpers.'));
+  const context=vm.createContext({sharedTaskRun:run=>run});vm.runInContext(helpers,context);
   assert.doesNotMatch(context.taskRunFailure({status:'stopped',error:generic}).reason,/model or runner error/);
+});
+
+test('inconclusive placement is neutral and does not claim execution or task failure', () => {
+  const reason='Motion completed; placement verification was inconclusive';
+  const {element,render}=fixture();
+  render({public_run:{runner_name:'Fixture',status:'stopped',error:reason}});
+  assert.equal(element.dataset.tone,'neutral');
+  assert.equal(element.textContent,'Fixture — Verification inconclusive: '+reason);
+  const helpers=source.slice(source.indexOf('function currentTaskRun('),source.indexOf('// End of shared task helpers.'));
+  const context=vm.createContext({sharedTaskRun:run=>run});vm.runInContext(helpers,context);
+  const result=context.taskRunFailure({status:'failed',error:reason});
+  assert.equal(result.label,'Verification inconclusive');
+  assert.equal(result.tone,'neutral');
+  assert.equal(result.reason,reason);
+  render({public_run:{status:'failed',error:reason},robot_fault:'Joint fault'});
+  assert.equal(element.dataset.tone,'error');
+});
+
+test('verified local admission never attributes its rejection to an older public runner',()=>{
+  const live={task:'Pick red',runner_name:'Vivek',status:'blocked',guard_admission_verified:true};
+  const {element,render}=fixture({live});
+  render({public_run:{runner_name:'Andrew',error:'Old task error',status:'stopped'}},
+    {label:'Blocked before model',reason:'The saved rule forbids red.'});
+  assert.equal(element.dataset.tone,'warning');
+  assert.match(element.textContent,/Vivek — Blocked before model/);
+  assert.doesNotMatch(element.textContent,/Andrew|Old task error|run error/);
+  render({robot_fault:'Joint fault',public_run:{runner_name:'Andrew'}},
+    {label:'Blocked before model',reason:'The saved rule forbids red.'});
+  assert.equal(element.textContent,'Robot error: Joint fault');
 });

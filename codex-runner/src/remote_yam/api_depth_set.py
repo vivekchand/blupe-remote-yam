@@ -70,7 +70,15 @@ class ApiDepthSet(CameraFrameSource):
             raise ValueError('Depth observation robot differs from configured robot')
         # A failed/rejected set must not expose a preceding successful set.
         self.snapshots = {}
-        report = json.loads(self.apis['top'].read('/calibration', 256_000))
+        try:
+            report = json.loads(self.apis['top'].read('/calibration', 256_000))
+        except error.HTTPError as exc:
+            # Feed read failures into the existing bounded whole-set recovery;
+            # a denial or bad route/configuration must not be retried.
+            raise CameraUnavailable('top', 'Calibration read failed', http_status=exc.code,
+                retryable=exc.code in (408,429,500,502,503,504)) from exc
+        except (TimeoutError, ConnectionError) as exc:
+            raise CameraUnavailable('top', 'Calibration read connection interrupted') from exc
         if stopped is None:
             stopped = depth_robot_stopped(observation)
         snapshots = {}
@@ -107,7 +115,7 @@ class ApiDepthSet(CameraFrameSource):
         """
         if observation.get('source') != 'hardware' or not depth_robot_stopped(observation):
             return
-        # ASPIRE retains the correlated Home/packet completion epoch separately
+        # Session policies retain the correlated Home/packet completion epoch separately
         # from newer stationary telemetry, under the same lease and step cursor.
         settled_at = observation.get('settled_after', observation.get('observed_at'))
         if type(settled_at) not in (int, float) or not math.isfinite(settled_at) or settled_at <= 0:

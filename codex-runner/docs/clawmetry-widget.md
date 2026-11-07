@@ -34,7 +34,7 @@ reaches the page only if both lists are edited. Every sentence in the tab is
 written in the browser from the kind and its numbers; no journal `message`
 string is published.
 
-A 10 Hz `packet_progress` stream folds to one advancing row per trajectory, in
+A 10/20/30 Hz `packet_progress` stream folds to one advancing row per trajectory, in
 place, so a move reads as a live counter rather than hundreds of rows. The server
 publishes at most 200 rows projected from the last 600 journal events, cached on
 the journal's own monotonic sequence so an idle journal is not re-projected for
@@ -115,7 +115,7 @@ callbacks bounded and avoid blocking native control.
 callback `(waypoints, observation, context) -> {'decision': 'allow' | 'reject'}`.
 Native plan/schema validation precedes it. Arguments are detached and returned
 replacement targets are ignored. Context contains source attempt/session/episode,
-robot/trajectory/first-step IDs and10Hz cadence; available measured timestamps
+robot/trajectory/first-step IDs and the actual selected 10/20/30 Hz cadence; available measured timestamps
 remain in the supplied observation. An installed callback must explicitly allow;
 exceptions/malformed decisions/refusals send no packet. Native Stop, session,
 lease, episode and attempt checks run again afterward and before submission.
@@ -151,3 +151,10 @@ model-video keys as `frames`, with actual `source_captured_at_s` (or null when
 unavailable) and `received_at_s` per frame. These source camera clocks remain
 separate from measured-state `observed_at` and SDK monotonic tick time. This adds
 no images, public event or poll; service observation can preserve exact provenance.
+
+
+### Latest upstream carry-forward (local validation)
+
+This composition is based on Andrew's shared upstream commit `04d8d2768172ee0b1fc290c3b2a3bb25995b18db`. The meeting shell, run library, task cloud, durable native recordings and configurable cadence remain upstream-owned. ClawMetry adds its optional tab through `application-head`; it does not select the initial tab or override the meeting palette. Status still comes from the native fetch, with no additional widget poller. The pre-dispatch callback and private Dream capture receive the actual selected cadence.
+
+The new upstream optional task-cloud stack includes `sentence-transformers`, `umap-learn` and `numba`; these are not required by the optional ClawMetry pane and have not been installed during this local carry-forward. Existing native public-catalog proxy behavior remains unchanged. Live browser acceptance, local Pro attachment and a physical run require separate operator verification. No deployment or physical run is part of this source carry-forward.
