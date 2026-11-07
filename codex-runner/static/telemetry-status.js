@@ -54,13 +54,13 @@
     const out = [];
     for (const raw of rows.slice(-80)) {
       const row = object(raw), kind = row.kind;
-      if (!['model_request', 'model_response', 'model_progress'].includes(kind)) continue;
+      if (!['model_request', 'model_response', 'model_progress', 'model_error'].includes(kind)) continue;
       if (kind === 'model_progress' && !['summary', 'status'].includes(row.progress_type)) continue;
       const identity = id(typeof row.id === 'number' ? String(row.id) : row.id);
       if (!identity || !finite(row.timestamp) || row.timestamp <= 0) continue;
       const calls = kind === 'model_response' ? toolCalls(row.message) : [];
       out.push({id: identity, timestamp_s: row.timestamp, kind,
-        note: kind === 'model_request' ? 'Model request sent.' : calls.length ? calls.map(call => call.note).filter(Boolean).join('\n').slice(0, 2000) || null : text(row.message),
+        note: kind === 'model_error' ? 'Model request failed.' : kind === 'model_request' ? 'Model request sent.' : calls.length ? calls.map(call => call.note).filter(Boolean).join('\n').slice(0, 2000) || null : text(row.message),
         progress_type: kind === 'model_progress' ? row.progress_type : null, tools: calls});
     }
     return out.slice(-32);

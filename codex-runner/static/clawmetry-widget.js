@@ -99,19 +99,19 @@
     packet_dispatched: row => 'Gateway accepted the packet for dispatch',
     packet_accepted: row => 'Gateway reported packet accepted for execution',
     packet_progress: row => 'Executing waypoint ' + counted(row.progress_count, '?') + ' of ' + counted(row.waypoint_count, '?'),
-    packet_completed: row => 'Completed ' + counted(row.waypoint_count, 'the') + ' waypoints; arms settled',
+    packet_completed: row => 'Robot reported completion of ' + counted(row.waypoint_count, 'the') + ' waypoints',
     packet_error: row => 'Packet ' + (row.status || 'failed') + (row.code ? ' · ' + row.code : '') +
       (Number.isSafeInteger(row.reported_progress) ? ' after ' + row.reported_progress + ' waypoints' : ''),
     execution_timing: row => 'Robot execution took ' + (seconds(row.elapsed_s) || 'an unreported time'),
     step_timing: row => 'Step ' + counted(row.step, '?') + ' took ' + (seconds(row.total_s) || 'an unreported time'),
     observation: row => 'Measured arm feedback received',
-    tool_result: row => Number.isSafeInteger(row.steps) ? 'Completed ' + row.steps + ' waypoints; feedback ready for the next call'
+    tool_result: row => Number.isSafeInteger(row.steps) ? 'Controller reported ' + row.steps + ' waypoints'
       : 'Policy outcome: ' + (row.status || 'reported'),
-    tool_error: row => 'No motion sent' + (row.code ? ' · ' + row.code : ''),
-    policy_timing: row => 'Policy stage ' + (row.stage || 'unnamed') + ' ' + (row.state || 'reported') +
+    tool_error: row => 'Controller error reported' + (row.code ? ' · ' + row.code : ''),
+    policy_timing: row => (row.stage ? 'Policy stage ' + row.stage + ' ' : 'Policy timing ') + (row.state || 'reported') +
       (seconds(row.duration_s) ? ' · ' + seconds(row.duration_s) : ''),
-    model_timing: row => 'Model stage ' + (row.stage || 'unnamed') + ' ' + (row.state || 'reported') +
-      (seconds(row.duration_s) ? ' · ' + seconds(row.duration_s) : ''),
+    model_timing: row => 'Model request timing reported' +
+      (seconds(row.elapsed_s ?? row.duration_s) ? ' · ' + seconds(row.elapsed_s ?? row.duration_s) : ''),
     ik_replay: row => 'Inverse kinematics replayed for the packet',
     observation_refreshed: row => 'Observation feed refreshed',
     observation_retry: row => 'Observation feed retrying',
@@ -142,7 +142,7 @@
       if (typeof gripper === 'number' && Number.isFinite(gripper)) parts.push((arm === 'left' ? 'L' : 'R') + ' grip ' + (gripper * 100).toFixed(0) + '%');
     }
     for (const name of ['first', 'last']) {
-      if (Array.isArray(row[name]) && row[name].length) parts.push(name + ' ' + degrees(row[name]));
+      if (Array.isArray(row[name]) && row[name].length) parts.push(name + ' target vector: ' + row[name].map(value => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(3) : 'Not reported').join(' '));
     }
     return parts.join(' · ');
   }
@@ -424,8 +424,8 @@
   // upstream's generic handler has also run for our button.
   const MODE = 'clawmetry';
   let tab, tabButton, tabNodes, assessmentLocation = null, reviewExpanded = false;
-  // Keep the meeting UI's initial view. The optional pane opens only when the
-  // visitor selects it and status polls never change that selection.
+  // Select the optional integration once. Subsequent status polls preserve
+  // the visitor's explicit tab and open/closed panel choices.
 
   function setPressed(active) {
     for (const button of document.querySelectorAll('[data-conversation-mode]')) {
@@ -474,7 +474,12 @@
     tabButton.setAttribute('aria-pressed', 'false');
     tabButton.setAttribute('aria-controls', 'clawmetryMotionPanel');
     strip.append(tabButton);
-    tabButton.addEventListener('click', () => { setPressed(tabButton); showMotion(true); });
+    tabButton.addEventListener('click', () => {
+      setPressed(tabButton); showMotion(true);
+      // The optional button may mount after upstream's static listener list.
+      // Publish the native mode so Visitor chat can return to this selection.
+      if (typeof CustomEvent === 'function') document.dispatchEvent(new CustomEvent('yam:conversation-mode', {detail:{mode:MODE,source:tabButton}}));
+    });
 
     tab = document.createElement('section');
     tab.id = 'clawmetryMotionPanel';
@@ -532,11 +537,17 @@
     const editor = add(scroll,'div','','cm-guard-editor-slot'); editor.id='cm-guard-editor-slot';
     const activity=add(scroll,'section','','cm-recent-section');activity.setAttribute('aria-label','Live robot activity');
     tabNodes.liveTask=add(activity,'p','','cm-live-task');
+    const guide=add(activity,'div','','cm-activity-guide');guide.setAttribute('aria-label','Follow model calls, Guard decisions and robot feedback');
+    for(const label of ['Model calls','Guard','Robot feedback'])add(guide,'span',label);
+    tabNodes.modelUpdate=add(activity,'section','','cm-model-update');tabNodes.modelUpdate.hidden=true;
+    tabNodes.modelUpdate.setAttribute('aria-label','Latest shared model update');
+    tabNodes.modelTitle=add(tabNodes.modelUpdate,'strong');tabNodes.modelDetail=add(tabNodes.modelUpdate,'p');
     tabNodes.guardNotice=add(activity,'div','','cm-guard-notice');tabNodes.guardNotice.hidden=true;
     tabNodes.guardNoticeTitle=add(tabNodes.guardNotice,'strong');
     tabNodes.guardNoticeDetail=add(tabNodes.guardNotice,'p');
     tabNodes.recent = add(activity,'ol','','cm-recent-events');tabNodes.recent.id='cm-recent-events';
     tabNodes.recent.setAttribute('aria-label','Recent robot activity');
+    tabNodes.activityNote=add(activity,'p','Reported updates. Task success is verified separately.','cm-activity-note');tabNodes.activityNote.hidden=true;
     tabNodes.empty = add(activity,'p','','cm-activity-empty');
     scroll.append(editor);
     const technical=add(scroll,'details','','cm-technical-activity');technical.id='cm-technical-activity';
@@ -570,6 +581,14 @@
       const mode = event.detail && event.detail.mode;
       if (mode === MODE) showMotion(true); else showMotion(false);
     });
+    window.ClawmetryRoom?.mount();
+    tabButton.click();
+    const activityButton=document.getElementById('meetingNotes');
+    if (activityButton?.getAttribute('aria-expanded')==='false') {
+      const focused=document.activeElement;
+      activityButton.click();
+      if (focused && focused!==document.body) focused.focus?.({preventScroll:true});
+    }
   }
   function renderDetailLink() {
     if (!tabNodes) return;
@@ -653,16 +672,29 @@
     tabNodes.measured.textContent=measurement
       ? (measurement.observation_kind==='station'?'Station feedback':'Session feedback')+' · '+ageLabel(fresh.age_s)+(measurement.ready===false?' · source reports not ready':measurement.settled===true?' · source reports settled':'')
       : 'No measured feedback received.';
+    const modelUpdate=window.ClawmetryActivity?.modelUpdate(view);
+    tabNodes.modelUpdate.hidden=!!local||!modelUpdate;
+    tabNodes.modelTitle.textContent=modelUpdate?.title||'';tabNodes.modelDetail.textContent=modelUpdate?.detail||'';
+    const motionModel=view?.motion?.run_id&&view.motion.run_id===view?.identity?.recording_run_id?view?.run?.model:null;
+    const readable=window.ClawmetryActivity?.motionEntries(rows,motionModel);
+    const entries=Array.isArray(readable)?readable:summary.recent.slice().reverse().map(row=>({...row,category:'status',title:motionText(row)||'Recorded update',detail:''}));
     const follow=tabNodes.recent.scrollHeight-tabNodes.recent.scrollTop-tabNodes.recent.clientHeight<80;
     tabNodes.recent.hidden=!!local;
-    tabNodes.recent.replaceChildren(...summary.recent.slice().reverse().map(row=>{
-      const item=document.createElement('li');item.dataset.kind=row.kind;
-      add(item,'span',motionText(row) || 'Recorded event');
-      const stamp=add(item,'time',new Date(row.t*1000).toLocaleTimeString());stamp.dateTime=new Date(row.t*1000).toISOString();return item;
-    }));
-    if(follow)tabNodes.recent.scrollTop=tabNodes.recent.scrollHeight;
-    tabNodes.empty.textContent=local?'Edit the task, then send it again.':hasRun?'Waiting for the next robot update…':'Send a task to start the live trace.';
-    tabNodes.empty.hidden=summary.recent.length>0&&!local;
+    const activitySignature=JSON.stringify(entries);
+    if(activitySignature!==tabNodes.activitySignature){
+      tabNodes.activitySignature=activitySignature;
+      const categories={model:'Model',input:'Camera & sensors',command:'Motion',execution:'Robot gateway',feedback:'Feedback',status:'Runner',issue:'Attention'};
+      tabNodes.recent.replaceChildren(...entries.map(row=>{
+        const item=document.createElement('li');item.dataset.kind=row.kind;item.dataset.category=row.category;
+        add(item,'span',categories[row.category]||'Reported update','cm-activity-actor');
+        add(item,'strong',row.title,'cm-activity-title');add(item,'span',row.detail,'cm-activity-detail');
+        const stamp=add(item,'time',new Date(row.t*1000).toLocaleTimeString());stamp.dateTime=new Date(row.t*1000).toISOString();return item;
+      }));
+      if(follow)tabNodes.recent.scrollTop=tabNodes.recent.scrollHeight;
+    }
+    tabNodes.activityNote.hidden=!!local||!entries.length;
+    tabNodes.empty.textContent=local?'Edit the task, then send it again.':disconnected?'Waiting to reconnect. Reload the page if this continues.':hasRun?'Waiting for the next robot update…':'Send a task to follow model calls, Guard decisions and robot feedback here.';
+    tabNodes.empty.hidden=(entries.length>0||!!modelUpdate)&&!local;
     if(tab && !tab.hidden)placeAssessment(true);
   }
   function renderMotion() {
