@@ -931,16 +931,18 @@ class DreamClient:
         assert [r['frames'] for r in predictions]==[['1'],['1','2'],['1','2','3'],['4']]
 
 
-def test_trusted_run_context_is_allowlisted_and_each_exchange_has_distinct_identity(tmp_path):
+@pytest.mark.parametrize('cadence_hz', [10, 20, 30])
+def test_trusted_run_context_is_allowlisted_and_each_exchange_has_distinct_identity(tmp_path, cadence_hz):
     source={'attempt_id':'attempt_fixture','session_id':'session_fixture','episode_id':'ep_fixture',
             'robot_id':'untrusted-override','api_key':'private-not-an-id','prompt':'private-prompt'}
     provider=adapter(tmp_path, run_context=lambda:source)
+    provider.configure_cadence(cadence_hz)
     try:
         provider.build_trajectory('move', observation(), 0)
         payload=next(p for command,p in provider._worker.calls if command=='predict')
         context=payload['observer_context']
         assert context['attempt_id']=='attempt_fixture' and context['episode_id']=='ep_fixture'
-        assert context['robot_id']=='yam-1' and context['cadence_hz']==10
+        assert context['robot_id']=='yam-1' and context['cadence_hz']==cadence_hz
         assert context['model']=='dreamlabs/dream-1-beta' and len(context['call_id'])==32
         assert 'private-' not in json.dumps(context)
         again=provider._prediction_context(observation(),0)

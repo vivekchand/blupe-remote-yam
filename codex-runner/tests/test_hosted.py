@@ -25,6 +25,121 @@ class HeldProvider(ScriptedAdapter):
 
 
 class HostedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hosted_works_gallery_has_public_snapshots_without_robot_sessions(self):
+        from html.parser import HTMLParser
+        class Links(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.images = []
+            def handle_starttag(self, tag, attrs):
+                if tag == 'img' and dict(attrs).get('src'):
+                    self.images.append(dict(attrs)['src'])
+        initial_apis = len(self.apis)
+        for route in ('/hosted_works', '/hosted_works/'):
+            code, body, _ = await self.call(route, extra={'sec-fetch-site':'cross-site'})
+            self.assertEqual(code, 200)
+            self.assertIn(b'Hosted Works', body)
+        links = Links(); links.feed(body.decode())
+        self.assertEqual(len(links.images), 3)
+        for removed in (b'RoboHarness', b'RoboSkills', b'EmbodiedEvo', b'MEMO', b'Agent as Policy'):
+            self.assertNotIn(removed, body)
+        for retained in (b'ClawMetry', b'Spotter', b'Completion-Aware Guidance'):
+            self.assertIn(retained, body)
+        for route in ('/research', '/research/'):
+            code, _, headers = await self.call(route, extra={'sec-fetch-site':'cross-site'})
+            self.assertEqual(code, 308)
+            self.assertEqual(headers[b'location'], b'/hosted_works/')
+        for asset in links.images + ['/static/research/gallery.css', '/static/research/gallery.js']:
+            code, data, headers = await self.call(asset)
+            self.assertEqual(code, 200, asset)
+            self.assertTrue(data)
+        for forbidden in ('../hosted.html', '%2e%2e/hosted.html', 'missing.webp', 'index.html'):
+            self.assertEqual((await self.call('/static/research/' + forbidden))[0], 404)
+        self.assertEqual((await self.call('/api/robots', extra={'sec-fetch-site':'cross-site'}))[0], 403)
+        self.assertFalse(self.app.visitors)
+        self.assertEqual(len(self.apis), initial_apis)
+
+    async def test_task_suggestions_follow_robot_and_saved_overrides_without_starting_run(self):
+        from remote_yam.task_suggestions import DEFAULTS, save_suggestions
+        path = self.app.root / 'task-suggestions.sqlite3'
+        with patch.dict('os.environ', {'YAM_TASK_SUGGESTIONS_DATABASE': str(path)}):
+            code, data, _ = await self.call('/api/task-suggestions')
+            self.assertEqual((code, data), (200, {'robot_id':'yam-1', 'suggestions':DEFAULTS['yam-1']}))
+            values = ['Lift the apple', 'Move the markers', 'Stack two blocks']
+            save_suggestions(path, 'yam-1', values)
+            self.assertEqual((await self.call('/api/task-suggestions'))[1]['suggestions'], values)
+            self.app.robot_id = 'yam-2'
+            self.assertEqual((await self.call('/api/task-suggestions'))[1]['suggestions'], DEFAULTS['yam-2'])
+            self.assertEqual((await self.call('/api/task-suggestions', extra={'sec-fetch-site':'cross-site'}))[0], 403)
+            self.assertEqual((await self.call('/api/task-suggestions', method='POST'))[0], 401)
+            self.assertFalse(self.app.visitors)
+            self.assertFalse(self.providers)
+
+    async def test_live_viewers_only_count_watching_sessions_and_deduplicate_tabs(self):
+        first, second = await self.session(), await self.session()
+        code, data, _ = await self.call('/api/status')
+        self.assertEqual(code, 401)
+        _, data, _ = await self.call('/api/status', **first)
+        self.assertEqual(data['live_viewer_count'], 0)
+        for _ in range(2):
+            _, data, _ = await self.call('/api/status', extra={'x-yam-watching':'1'}, **first)
+            self.assertEqual(data['live_viewer_count'], 1)
+        # A background tab sharing the first cookie must not remove its visible tab.
+        _, data, _ = await self.call('/api/status', extra={'x-yam-watching':'0'}, **first)
+        self.assertEqual(data['live_viewer_count'], 1)
+        _, data, _ = await self.call('/api/status', extra={'x-yam-watching':'1'}, **second)
+        self.assertEqual(data['live_viewer_count'], 2)
+        self.assertFalse(self.providers, 'Watching must never start a robot policy')
+        self.assertNotIn('cookie', data)
+        self.assertNotIn('watchers', data)
+
+    async def test_live_viewers_expire_without_a_visible_heartbeat(self):
+        first, second = await self.session(), await self.session()
+        await self.call('/api/status', extra={'x-yam-watching':'1'}, **first)
+        await self.call('/api/status', extra={'x-yam-watching':'1'}, **second)
+        first_visitor, second_visitor = self.app.visitors.values()
+        first_visitor.last_watched -= hosted.LIVE_VIEWER_SECONDS
+        _, data, _ = await self.call('/api/status', extra={'x-yam-watching':'0'}, **first)
+        self.assertEqual(data['live_viewer_count'], 1)
+        second_visitor.retired = True
+        _, data, _ = await self.call('/api/status', **first)
+        self.assertEqual(data['live_viewer_count'], 0)
+        second_visitor.retired = False
+
+    async def test_live_viewer_script_is_publicly_served(self):
+        code, body, _ = await self.call('/static/live-viewers.js')
+        self.assertEqual(code, 200)
+        self.assertIn(b'window.yamLiveViewers', body)
+
+    async def test_public_label_export_is_separate_from_runner_assessments(self):
+        code, data, _ = await self.call('/api/run-labels')
+        self.assertEqual(code, 200)
+        self.assertEqual(data['version'], 1)
+        self.assertEqual(len(data['runs']), 416)
+        self.assertEqual(self.app.run_assessments.summaries(), {})
+        code, _, _ = await self.call('/static/run-labels.js')
+        self.assertEqual(code, 200)
+
+    async def test_cloud_label_summary_preserves_outcomes_and_scoped_replay_evidence(self):
+        code, full, _ = await self.call('/api/run-labels')
+        self.assertEqual(code, 200)
+        code, compact, _ = await self.call('/api/run-labels', query='summary=1')
+        self.assertEqual(code, 200)
+        self.assertEqual(len(compact['runs']), len(full['runs']))
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(full)) / 4)
+        for original, row in zip(full['runs'], compact['runs']):
+            self.assertEqual(row['episode_id'], original['episode_id'])
+            self.assertEqual(row['robot_id'], original['robot_id'])
+            self.assertEqual(row['auto_assessment'], {key:original['auto_assessment'][key] for key in ('label', 'model')})
+            self.assertEqual(row['human_review'], {'label':original['human_review']['label']} if original['human_review'] else None)
+        run = full['runs'][0]
+        from urllib.parse import urlencode
+        query = urlencode({key:run[key] for key in ('episode_id', 'robot_id')})
+        self.assertEqual((await self.call('/api/run-labels', query=query))[1]['runs'], [run])
+        self.assertEqual((await self.call('/api/run-labels', query=query+'&robot_id=wrong'))[0], 400)
+        self.assertEqual((await self.call('/api/run-labels', query='episode_id='+run['episode_id']+'&robot_id=other'))[1]['runs'], [])
+        self.assertFalse(self.app.visitors)
+        self.assertEqual(self.app.run_assessments.summaries(), {})
+
     async def test_model_catalog_requires_session_csrf_and_keeps_keys_private(self):
         with patch('remote_yam.model_catalog.discover_models', return_value={
                 'models':[{'id':'gpt-6.1-sol','label':'Sol 6.1'}], 'source':'provider'}) as discover:
@@ -70,6 +185,19 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [('codex','gpt-6.1-sol')])
         self.assertEqual(hosted.model_display_name({'provider':'codex','model':'gpt-6.1-sol'}), 'gpt-6.1-sol')
 
+    async def test_queue_notification_uses_effective_provider_model(self):
+        browser = await self.session()
+        original = self.app.provider_factory
+        def factory(name, key, model, directory):
+            provider = original(name, key, model, directory)
+            provider.model = 'configured-checkpoint'
+            return provider
+        self.app.provider_factory = factory
+        code, result, _ = await self.call('/api/run', method='POST', payload={
+            'provider': 'openai', 'api_key': 'private-key', 'prompt': 'Move block'}, **browser)
+        self.assertEqual(code, 200, result)
+        self.assertEqual(self.apis[-1].create_requests[0]['model'], 'configured-checkpoint')
+
     async def test_model_floor_cannot_be_bypassed_by_manually_entered_id(self):
         browser = await self.session()
         for provider, model in [('openai','gpt-6-sol'),('anthropic','claude-opus-5-4'),
@@ -94,6 +222,8 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
                                        provider_factory=provider_factory)
         from remote_yam.past_runs import RunNames
         self.app.run_names = RunNames(self.app.root/'names.sqlite3')
+        from remote_yam.run_assessments import RunAssessments
+        self.app.run_assessments = RunAssessments(self.app.root/'assessments.sqlite3')
 
     async def test_private_transport_is_attached_before_queue_and_closed_after_stop(self):
         _,visitor=self.app.new_visitor()
@@ -210,11 +340,11 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*self.app.cleanups)
         shutil.rmtree(self.app.root, ignore_errors=True)
 
-    async def call(self, path, *, method="GET", payload=None, cookie="", csrf="", origin="https://robot.example", extra=None, raw=None):
+    async def call(self, path, *, method="GET", payload=None, cookie="", csrf="", origin="https://robot.example", extra=None, raw=None, query=""):
         headers = {"host": "robot.example", "origin": origin, "content-type": "application/json",
                    "cookie": cookie, "x-yam-runner-token": csrf}
         headers.update(extra or {})
-        scope = {"type": "http", "method": method, "path": path,
+        scope = {"type": "http", "method": method, "path": path, "query_string": query.encode(),
                  "headers": [(k.encode(), v.encode()) for k, v in headers.items()]}
         received = False
         async def receive():
@@ -290,7 +420,7 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.runner_task, 'Raise and lower both arms for three cycles.')
         self.assertEqual(visitor.controller._prompt, visitor.runner_task)
 
-    async def test_aspire_preparation_is_public_before_a_robot_session_exists(self):
+    async def test_policy_preparation_is_public_before_a_robot_session_exists(self):
         browser=await self.session()
         _,owner=self.app.new_visitor()
         owner.runner_task='Stack two blocks';owner.runner_name='Fixture'

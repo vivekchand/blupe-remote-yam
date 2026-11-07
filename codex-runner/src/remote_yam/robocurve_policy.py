@@ -8,6 +8,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 import uuid
@@ -16,6 +17,25 @@ from .session import MAX_COMMANDS
 from .providers import ResponsesAdapter, PolicyComplete
 from .robocurve_contract import SYSTEM_PROMPT, TOOLS
 from .robocurve_trajectory import RoboCurveTrajectory, NAMES, InvalidMove
+
+
+def _unsubmitted_packet_digest(waypoints, call_id=None):
+    """Identity of the complete locally prepared packet, without normalization."""
+    from .session import MAX_WAYPOINTS_PER_PACKET, _trajectory_waypoints
+    if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= MAX_WAYPOINTS_PER_PACKET:
+        raise ValueError('Invalid unsubmitted packet')
+    # This adapter is also inherited by SO101 and single-arm variants. The
+    # transport validates configured robot widths separately; this digest must
+    # preserve their exact packet shape rather than assume a YAM model.
+    first = waypoints[0]
+    if not isinstance(first, dict):
+        raise ValueError('Invalid unsubmitted packet')
+    counts = tuple(len(first.get(side + '_joints_deg', ())) for side in ('left', 'right'))
+    if any(count > 16 for count in counts) or not any(counts):
+        raise ValueError('Invalid unsubmitted packet joint counts')
+    _trajectory_waypoints(waypoints, counts)
+    return hashlib.sha256(json.dumps({'call_id':call_id, 'waypoints':waypoints}, sort_keys=True, separators=(',', ':'),
+                                    allow_nan=False).encode()).hexdigest()
 
 
 class CallRecorder:
@@ -82,6 +102,8 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
         self.cancelled = lambda: False
         self.refresh_observation = None
         self.interaction_sink = None
+        self.observation_observer = None
+        self.completion_observer = None
         from .steering import SteeringInbox
         self.steering = SteeringInbox(self._interaction)
 
@@ -221,6 +243,27 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
         except Exception:
             self._vision_state = 'camera_error'
             raise
+        # Optional private evidence of selected policy inputs, not transport
+        # confirmation. Reuse the exact completed set; never acquire frames or
+        # expose prompt, planning-scene contents or camera connection metadata.
+        try:
+            observer = self.observation_observer
+            if observer is not None:
+                value = {
+                    'schema': 'clawmetry.policy.observation.v1',
+                    'frames': [{'camera': name, 'jpeg': bytes(frames[name].jpeg),
+                        'source_captured_at_s': frames[name].source_captured_at,
+                        'received_at_s': frames[name].received_at} for name in self._camera_names],
+                    'first_step_id': first_step_id, 'call_ordinal': self._calls + 1,
+                    'observation_step_id': observation.get('step_id'),
+                    'observed_at': observation.get('observed_at'),
+                    'episode_id': observation.get('episode_id'), 'planning_only': bool(scene),
+                }
+                if not self.cancelled():
+                    observer(value)
+        except BaseException:
+            # Evidence must not change inference or camera failure behavior.
+            pass
         return {'role': 'user', 'content': content}
 
     def _tool_result(self, call_id, result):
@@ -238,6 +281,61 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
         self._interaction('tool_error' if result.get('ok') is False else 'tool_result',
                           message,
                           call_id=call_id, result=result)
+
+    def discard_unsubmitted_trajectory(self, waypoints, *, first_step_id, observation, context):
+        """Resolve an exact stale local tool as unexecuted, then permit a new plan.
+
+        Only the trusted controller can establish that zero waypoints were sent.
+        This opt-in hook does not infer, capture images, rebuild old targets,
+        report completion, change geometry references, or advance a cursor.
+        """
+        pending = self._pending
+        try:
+            if (self.cancelled() or not isinstance(pending, dict) or not isinstance(observation, dict)
+                    or not isinstance(context, dict) or type(first_step_id) is not int
+                    or first_step_id < 0 or first_step_id != pending['first_step_id']
+                    or type(observation.get('step_id')) is not int or observation['step_id'] != first_step_id
+                    or observation.get('source') != 'hardware' or observation.get('settled') is not True
+                    or tuple(observation.get(key) for key in ('episode_id', 'lease_id')) != self._episode
+                    or type(context.get('first_step_id')) is not int or context['first_step_id'] != first_step_id
+                    or context.get('episode_id') != observation.get('episode_id')
+                    or context.get('reason_code') != 'pre_dispatch_pose_changed'
+                    or context.get('dispatched') is not False
+                    or type(context.get('executed_waypoints')) is not int or context['executed_waypoints'] != 0
+                    or not isinstance(context.get('robot_id'), str) or not context['robot_id']
+                    or not isinstance(context.get('session_id'), str) or not context['session_id']):
+                raise ValueError('Pending tool or source identity changed')
+            if any(not isinstance(observation.get(key), str) or not 1 <= len(observation[key]) <= 512
+                   for key in ('episode_id', 'lease_id')):
+                raise ValueError('Missing measured lease context')
+            baseline = dict(step_id=first_step_id, **{key:observation[key] for key in
+                ('left_joints_deg', 'right_joints_deg', 'left_gripper', 'right_gripper')})
+            if any(type(baseline[key]) not in (int, float) for key in ('left_gripper', 'right_gripper')):
+                raise ValueError('Missing measured gripper feedback')
+            if any(not isinstance(baseline[side+'_joints_deg'], (list, tuple)) or len(baseline[side+'_joints_deg']) != 6
+                   for side in ('left', 'right')):
+                raise ValueError('Unsubmitted recovery requires the YAM joint contract')
+            _unsubmitted_packet_digest([baseline])
+            robots = [observation[key] for key in ('jetson_id', 'robot_id') if key in observation]
+            if not robots or any(value != context['robot_id'] for value in robots):
+                raise ValueError('Measured robot identity changed')
+            if (not isinstance(waypoints, list) or len(waypoints) != pending['waypoint_count']
+                    or waypoints[-1].get('step_id') != pending['last_step_id']
+                    or waypoints[0].get('step_id') != first_step_id
+                    or _unsubmitted_packet_digest(waypoints, pending['call_id']) != pending['packet_sha256']
+                    or pending.get('workspace_recovery') is not None):
+                raise ValueError('Unsubmitted packet changed')
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError, OverflowError):
+            raise RuntimeError('Unsubmitted stale packet does not match the pending model tool') from None
+        if self.cancelled():
+            raise RuntimeError('Unsubmitted stale packet discard cancelled')
+        self._tool_result(pending['call_id'], {
+            'ok': False, 'status': 'not_executed', 'code': 'pre_dispatch_pose_changed',
+            'error': 'Measured joint or gripper pose changed while this packet was being planned. No motion was sent.',
+            'steps': 0, 'dispatched': False,
+            'instruction': 'Discard this packet and its target. Use the next fresh measured observation and new camera images to choose a new plan. Do not replay this packet. Give up if you cannot proceed safely.'})
+        self._pending = None
+        return True
 
     def trajectory_failed(self, code, message, waypoint_count, *, feedback=None):
         """Return verified completion failures or a measured workspace hold."""
@@ -291,9 +389,62 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
             result.update(feedback=copy.deepcopy(self._pending['workspace_recovery']),
                 instruction='The controller executed an adjusted target inside its workspace boundary. '
                     'The original requested motion was changed; inspect replacement feedback and the next measured observation before choosing a new target.')
+        self._notify_tracking_completion(observation, waypoint_count)
         self._tool_result(self._pending['call_id'], result)
         self._pending = None
         self._failures = 0
+
+    def _notify_tracking_completion(self, observation, waypoint_count):
+        """Optional numerical evidence, not calibration truth or a task reward."""
+        try:
+            observer, pending = self.completion_observer, self._pending
+            if observer is None:
+                return
+            def state(value, *, target=False):
+                result = {}
+                if target:
+                    step = value.get('step_id')
+                    if type(step) is not int or not 0 <= step < 2**63:
+                        raise ValueError('Invalid tracking cursor')
+                    result['step_id'] = step
+                for arm in ('left', 'right'):
+                    joints, grip = value.get(arm+'_joints_deg'), value.get(arm+'_gripper')
+                    if (not isinstance(joints, (list, tuple)) or len(joints) != 6
+                            or any(type(v) not in (int, float) or not math.isfinite(v) for v in joints)
+                            or type(grip) not in (int, float) or not math.isfinite(grip) or not 0 <= grip <= 1):
+                        raise ValueError('Invalid tracking measurement')
+                    result[arm+'_joints_deg'], result[arm+'_gripper'] = list(joints), grip
+                return result
+            stamp, episode = observation.get('observed_at'), observation.get('episode_id')
+            if (type(waypoint_count) is not int or waypoint_count != pending['waypoint_count']
+                    or type(self._calls) is not int or self._calls < 1
+                    or type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp <= 0
+                    or observation.get('settled') is not True
+                    or observation.get('source') not in ('hardware', 'simulation')
+                    or not isinstance(episode, str) or not 1 <= len(episode) <= 160 or episode != self._episode[0]
+                    or type(observation.get('step_id')) is not int or observation['step_id'] != pending['last_step_id']+1
+                    or not isinstance(pending['call_id'], str) or not 1 <= len(pending['call_id']) <= 160):
+                return
+            value = dict(schema='learning.tracking_completion.v1', version=1,
+                first_step_id=pending['first_step_id'], last_step_id=pending['last_step_id'],
+                waypoint_count=waypoint_count, call_id=pending['call_id'], call_ordinal=self._calls,
+                packet_sha256=pending['packet_sha256'], first_target=state(pending['first_target'], target=True),
+                final_target=state(pending['final_target'], target=True), measured=state(observation),
+                observation_step_id=observation['step_id'], observed_at=stamp, episode_id=episode,
+                source=observation['source'], settled=True, workspace_adjusted=bool(pending.get('workspace_recovery')))
+            if (type(pending['first_step_id']) is not int or type(pending['last_step_id']) is not int
+                    or value['first_target']['step_id'] != pending['first_step_id']
+                    or value['final_target']['step_id'] != pending['last_step_id']
+                    or pending['last_step_id'] - pending['first_step_id'] + 1 != waypoint_count
+                    or not isinstance(value['packet_sha256'], str) or len(value['packet_sha256']) != 64
+                    or any(c not in '0123456789abcdef' for c in value['packet_sha256'])):
+                return
+            if not self.cancelled():
+                observer(value)
+        except BaseException:
+            # Evidence failure, including cancellation checks, cannot replace
+            # the original completion/tool-result path or trigger another move.
+            pass
 
     def rebuild_pending_trajectory(self, observation, first_step_id):
         """Resolve the same unexecuted tool target from fresh measured Home."""
@@ -306,7 +457,9 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
         # Preserve call identity and orientation reference. IK/pacing may change
         # the point count, so completion must use the regenerated packet cursor.
         self._pending = {**pending, 'waypoint_count':len(points),
-                         'last_step_id':points[-1]['step_id']}
+                         'last_step_id':points[-1]['step_id'],
+                         'first_target':copy.deepcopy(points[0]), 'final_target':copy.deepcopy(points[-1]),
+                         'packet_sha256':_unsubmitted_packet_digest(points, pending['call_id'])}
         self._record('joint_packet', call=self._calls, cadence_hz=10,
                      rebuilt_from_current_home=True, waypoints=points)
         self._interaction('packet_ready', f'Rebuilt {len(points)} waypoints from current Home',
@@ -425,7 +578,9 @@ class RoboCurveResponsesAdapter(ResponsesAdapter):
                 points = self._geometry.build(args['targets'], observation, first_step_id)
                 self._pending = {'call_id': call['call_id'], 'waypoint_count': len(points),
                                  'last_step_id': points[-1]['step_id'],
-                                 'first_step_id':first_step_id, 'targets':copy.deepcopy(args['targets'])}
+                                 'first_step_id':first_step_id, 'targets':copy.deepcopy(args['targets']),
+                                 'first_target':copy.deepcopy(points[0]), 'final_target':copy.deepcopy(points[-1]),
+                                 'packet_sha256':_unsubmitted_packet_digest(points, call['call_id'])}
                 self._record('joint_packet', call=self._calls, cadence_hz=10, waypoints=points)
                 self._interaction('packet_ready', f'Prepared {len(points)} joint waypoints at 10 Hz',
                                   waypoint_count=len(points), first=points[0], last=points[-1])

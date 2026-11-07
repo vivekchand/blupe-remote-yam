@@ -3,7 +3,8 @@
   'use strict';
   function identity(view) {
     const ids = view.identity || {};
-    return JSON.stringify([view.robot_id, view.scope, ids.attempt_id, ids.public_run_id, ids.episode_id]);
+    return JSON.stringify([view.robot_id, view.scope, ids.attempt_id, ids.public_run_id, ids.episode_id,
+      view.trust?.trace_id || view.motion?.run_id || null]);
   }
   // One advancing row per trajectory; every other row is distinct by journal id.
   const ADVANCING = new Set(['packet_progress']);
@@ -17,7 +18,7 @@
       // a long run's early moves stay readable after they leave that window.
       updateMotion(view) {
         const next = view && view.motion;
-        if (!next) return false;
+        if (!next) { const changed = motion.size > 0 || motionSource !== null; motion.clear(); motionRun = motionSource = null; return changed; }
         if (motionRun !== next.run_id) { motion.clear(); motionRun = next.run_id; }
         const before = motion.size, source = motionSource;
         motionSource = next.source;
@@ -96,7 +97,7 @@
     packet_ready: row => 'Prepared ' + counted(row.waypoint_count, 'the') + ' waypoints at ' + counted(row.cadence_hz, 10) + ' Hz',
     packet_submit: row => 'Sent ' + counted(row.waypoint_count, 'the') + ' waypoints to the gateway',
     packet_dispatched: row => 'Gateway accepted the packet for dispatch',
-    packet_accepted: row => 'Safety checks passed; executing the packet',
+    packet_accepted: row => 'Gateway reported packet accepted for execution',
     packet_progress: row => 'Executing waypoint ' + counted(row.progress_count, '?') + ' of ' + counted(row.waypoint_count, '?'),
     packet_completed: row => 'Completed ' + counted(row.waypoint_count, 'the') + ' waypoints; arms settled',
     packet_error: row => 'Packet ' + (row.status || 'failed') + (row.code ? ' · ' + row.code : '') +
@@ -124,6 +125,8 @@
     feedback_check: row => 'Hardware feedback check ' + (row.status || 'reported'),
     feedback_timeout: row => 'Station status fetch exceeded the feedback deadline',
     reconnecting: row => 'Reconnecting to the same session',
+    plan_recovery: row => row.state==='exhausted' ? 'Replanning limit reached; no new motion sent'
+      : 'Plan changed; checking a fresh view (retry '+row.retry_count+' of '+row.retry_limit+')',
   };
   function motionText(row) {
     const build = MOTION_TEXT[row.kind];
@@ -143,18 +146,160 @@
     }
     return parts.join(' · ');
   }
+  const meaningfulMotion = row => {
+    if (!row || typeof row.kind !== 'string') return false;
+    if (row.kind === 'feedback_check') return [row.status, row.state, row.code, row.reason_code]
+      .some(value => typeof value === 'string' && /wait|reject|fail|stale|missing|unsafe|unavailable/.test(value));
+    if (row.kind === 'worker_recovery') return !['ready','completed','recovered'].includes(row.state);
+    return ['packet_submit','packet_accepted','packet_completed','packet_error','tool_error',
+      'stop_requested','stopped','policy_complete','observation_failure','feedback_timeout','reconnecting','plan_recovery'].includes(row.kind);
+  };
+  function recordedOutcomeGuard(view) {
+    const trust=view?.trust,guard=trust?.guard;
+    if(trust?.schema!=='clawmetry.trust.v1'||!/^\/clawmetry\/trace\/[a-f0-9]{32}$/.test(view?.detail_path||'')
+      ||view.detail_path!=='/clawmetry/trace/'+trust.trace_id||guard?.source!=='duckdb_recorded_events'
+      ||guard.coverage_scope!=='local_joint_trajectory'||!['configured','decision_recorded'].includes(guard.state)||!['monitor','block'].includes(guard.mode)
+      ||!Number.isSafeInteger(guard.config_version)||guard.config_version<1||!Number.isSafeInteger(guard.sequence)||guard.sequence<1
+      ||!/^[a-f0-9]{64}$/.test(guard.config_hash||''))return null;
+    return guard;
+  }
+  function recordedRule(guard) {
+    if(!guard)return null;
+    const config=guard.config;
+    if(!config||config.schema!=='clawmetry.blupe.guard.v1'||config.version!==guard.config_version||config.mode!==guard.mode)return 'Recorded configuration v'+guard.config_version+'; rule values are not loaded.';
+    const parts=[],colors=config.object_color_guard?.forbidden_colors;
+    if(Array.isArray(colors)&&colors.length&&colors.length<=4&&new Set(colors).size===colors.length
+      &&colors.every((color,index)=>['blue','green','red','yellow'].includes(color)&&color===colors.slice().sort()[index]))parts.push('do not grasp '+colors.join(', ')+' objects');
+    if(typeof config.max_step_deg==='number'&&Number.isFinite(config.max_step_deg))parts.push('joint steps at most '+config.max_step_deg+'°');
+    if(typeof config.max_feedback_age_s==='number'&&Number.isFinite(config.max_feedback_age_s))parts.push('feedback at most '+config.max_feedback_age_s+' s old');
+    return 'Recorded configuration v'+guard.config_version+(parts.length?': '+parts.join('; ')+'.':'.');
+  }
+  function runOutcome(view, rows = []) {
+    const guard=recordedOutcomeGuard(view),rule=recordedRule(guard);
+    if(guard?.state==='decision_recorded'&&guard.decision==='reject') {
+      const reasons=Array.isArray(guard.reasons)?guard.reasons:[],missing=Array.isArray(guard.missing)?guard.missing:[];
+      const color=guard.outcome==='violation' ? ['blue','green','red','yellow'].find(value=>reasons.includes('forbidden_'+value+'_grasp')) : null;
+      const supplied=new Set([...reasons,...missing]);
+      const labels=[['object_color_feedback_stale','Hardware feedback expired during the grasp check.'],
+        ['object_color_capture_stale','The paired camera frame expired during the grasp check.'],
+        ['color_guard_calibration_unvalidated','Camera geometry needs physical validation.'],
+        ['validated_extrinsics','Validated camera geometry was unavailable.'],
+        ['fresh_measured_hardware_baseline','Fresh measured hardware feedback was unavailable.'],
+        ['fresh_measured_feedback','Fresh measured hardware feedback was unavailable.'],
+        ['object_color_capture_unavailable','A usable paired camera capture was unavailable.'],
+        ['object_color_evidence_unavailable','The grasp check could not be verified.'],
+        ['guard_configuration_changed','Rules changed during the check.']];
+      const notes=[...new Set(labels.filter(([code])=>supplied.has(code)).map(([,note])=>note))];
+      return {category:'blocked',title:'Blocked by Guard',detail:color?'Guard refused the planned grasp of a recognized '+color+' region.':notes.slice(0,2).join(' ')||'The recorded packet was refused before dispatch by its local checks.',rule,guard_sequence:guard.sequence};
+    }
+    const failed=['failed','timed_out','safety_aborted'].includes(view?.run?.status);
+    if(failed)return {category:'failed',title:'Failed',detail:view.run.status==='timed_out'?'The run deadline expired. Task success was not verified.':view.run.status==='safety_aborted'?'The source reported an aborted run. Task success was not verified.':'The source reported a failed run.',rule,guard_sequence:guard?.sequence||null};
+    const ended=['stopped','complete','completed','resetting'].includes(view?.run?.status);
+    return {category:'unverified',title:'Unverified',detail:ended?'The run ended without a verified task result.':view?.run?.present?'The run has no verified task result yet.':'No run outcome is recorded.',rule,guard_sequence:guard?.sequence||null};
+  }
+  function runSummary(view, rows = [], options = {}) {
+    const recent = rows.filter(meaningfulMotion).slice().sort((a,b) => b.t-a.t || b.id-a.id).slice(0,3);
+    const states = {
+      idle:['No active run','Rules can be prepared before the next manual Run.'],
+      queued:['Waiting for a turn','No task packet is executing for this queued run.'],
+      preparing:['Preparing the robot','Native readiness and Home checks are in progress.'],
+      running:['Run in progress','Follow requested actions and measured feedback separately.'],
+      stopped:['Run stopped','The session ended. Task success and physical stopping require separate evidence.'],
+      completed:['Run ended','The runner reported completion. Review the evidence before assessing the task.'],
+      complete:['Run ended','The runner reported completion. Review the evidence before assessing the task.'],
+      resetting:['Run ended; station resetting','The source reports resetting. This is not a task-success or physical-stop verdict.'],
+      failed:['Run failed','Review the last reported failure and the recorded evidence.'],
+      disconnected:['Connection interrupted','Latest state may be out of date; this does not confirm a physical stop.'],
+      safety_aborted:['Run aborted','The source reported an abort. Review its reason and measured feedback.'],
+      timed_out:['Run timed out','The session deadline ended the run. This is not a task-success verdict.'],
+    };
+    let state = states[view?.run?.status];
+    const hold=view?.trust?.schema==='clawmetry.trust.v1' ? view.trust.launch_hold : null;
+    if(!options.currentRunOnly&&hold?.state==='held'&&['unsupported_policy','unapplied_policy','owner_changed'].includes(hold.reason))state=['Next run held for review','Review or replace the requested rules before the next Run. This does not stop or change an active run.'];
+    if (options.disconnected) state = states.disconnected;
+    if (!state) state = view?.run?.present ? ['Run status not reported','Evidence is available, but this source did not report a run phase.'] : states.idle;
+    return {title:state[0],detail:state[1],latest:recent[0] || null,recent,outcome:runOutcome(view,rows)};
+  }
+  function guardSummary(view) {
+    const trust = view?.trust?.schema === 'clawmetry.trust.v1' ? view.trust : null;
+    let guard = trust?.guard || {};
+    if (['configured','decision_recorded'].includes(guard.state) && (!/^[a-f0-9]{64}$/.test(guard.config_hash || '')
+      || !Number.isSafeInteger(guard.config_version) || guard.config_version<1
+      || !Number.isSafeInteger(guard.sequence) || guard.sequence<1)) guard={};
+    if (guard.state === 'configured') return {title:'Rules recorded; awaiting a check',detail:'A configuration was recorded for this run, but no packet decision was supplied.',tone:'unknown'};
+    if (guard.state !== 'decision_recorded' || !['allow','reject'].includes(guard.decision)) return {
+      title:'No Guard decision recorded',detail:'Saved preferences and gateway receipts do not prove that a Guard check ran.',tone:'unknown'};
+    const labels = {fresh_measured_feedback:'Fresh measured feedback was not available.',
+      forbidden_red_grasp:'The planned grasp overlaps a recognized red region.',
+      forbidden_yellow_grasp:'The planned grasp overlaps a recognized yellow region.',
+      forbidden_blue_grasp:'The planned grasp overlaps a recognized blue region.',
+      forbidden_green_grasp:'The planned grasp overlaps a recognized green region.',
+      color_guard_calibration_unvalidated:'Camera calibration needs physical validation.',
+      validated_extrinsics:'Validated camera geometry was unavailable.',
+      color_guard_stale_capture_horizon:'The image would be too old when the gripper closes.',
+      color_guard_unknown_object:'No recognized object could be matched to the grasp.',
+      color_guard_ambiguous_object:'The grasp region has more than one possible target.',
+      object_color_capture_unavailable:'A usable paired color and depth capture was unavailable.',
+      object_color_evidence_unavailable:'The object check could not be verified.',
+      guard_configuration_changed:'Rules changed during the check. The packet was refused.',
+      source_capture_timestamp:'A required source capture timestamp was not available.',
+      source_camera_capture_timestamp:'A required camera capture timestamp was not available.',
+      feedback_age:'Feedback exceeded the configured age.', max_step_deg:'A joint step exceeded the configured limit.'};
+    const supplied = [...(Array.isArray(guard.reasons)?guard.reasons:[]),...(Array.isArray(guard.missing)?guard.missing:[])];
+    const reason = supplied.map(value=>labels[value]).filter(Boolean).join(' ');
+    if (guard.decision === 'reject') return {title:'Packet held before dispatch',detail:reason || 'The recorded packet was refused by its configured local checks.',tone:'held'};
+    return {title:guard.mode === 'block' ? 'Last recorded packet allowed by Guard' : 'Last recorded packet reviewed in monitor mode',
+      detail:reason || 'Only the recorded local trajectory checks are covered; this is not a task-success verdict.',tone:'reviewed'};
+  }
+  // This is an ephemeral request receipt, not a robot run or history record.
+  function createAdmissionState() {
+    let pending=null, rejected=null;
+    const validLaunch=value=>value && Number.isSafeInteger(value.version) && value.version>=0 &&
+      typeof value.robot_id==='string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(value.robot_id);
+    const colors=value=>Array.isArray(value) && value.length<=4 && value.every((color,index)=>
+      ['blue','green','red','yellow'].includes(color) && (!index || value[index-1]<color));
+    const hash=value=>typeof value==='string' && /^[0-9a-f]{64}$/.test(value);
+    const matches=value=>validLaunch(value) && pending && value.version===pending.version && value.robot_id===pending.robot_id;
+    return {
+      start(value) { rejected=null; pending=validLaunch(value)?{version:value.version,robot_id:value.robot_id}:null; },
+      accept(value) { if(matches(value)) {pending=null;rejected=null;} },
+      reject(value) {
+        if(!matches(value))return false;
+        const guard=value.guard_admission;
+        if(!guard || guard.schema!=='clawmetry.intent_guard.v1' || guard.version!==1 ||
+          guard.decision!=='reject' || guard.mode!=='block' || guard.scope!=='explicit_color_intent' ||
+          guard.physical_permission_granted!==false || !hash(value.task_hash) || guard.task_hash!==value.task_hash ||
+          !hash(guard.config_hash) || !colors(guard.forbidden_colors) || !guard.forbidden_colors.length ||
+          !colors(guard.requested_colors) || !colors(guard.blocked_colors))return false;
+        const blocked=guard.requested_colors.filter(color=>guard.forbidden_colors.includes(color));
+        if(JSON.stringify(blocked)!==JSON.stringify(guard.blocked_colors))return false;
+        const violation=guard.outcome==='intent_violation' && guard.reason_code==='forbidden_color_requested' && blocked.length>0;
+        const uncertain=guard.outcome==='intent_uncertain' && guard.reason_code==='color_intent_needs_clarification' && !blocked.length;
+        if(!violation && !uncertain)return false;
+        rejected=Object.freeze({category:'blocked',title:'Blocked by Guard',context:'Current request · not queued',
+          detail:violation?'The request conflicts with the saved color rule. No model call was made and no robot task was queued.':
+            'Guard could not confidently match this request to the saved color rule. Clarify the object before Run. No model call was made and no robot task was queued.',
+          rule:'Rule checked for this request: never pick '+guard.forbidden_colors.join(', ')+' objects.',
+          robot_id:value.robot_id,version:value.version});
+        return true;
+      },
+      clear() {pending=null;rejected=null;},
+      current() {return rejected;},
+    };
+  }
   const MOTION_SOURCE_TEXT = {
     station_journal: 'Live from this station’s run journal. Every packet, waypoint and measured report on this station, whether or not its conversation is shared.',
-    remote_host: 'This run is executing on another host. Its move journal is not readable from this station, so no timeline is shown rather than an empty one.',
+    remote_host: 'The move journal for the displayed station run is not available here. Open its saved run to inspect recorded evidence.',
     unavailable: 'The station run journal could not be read for this run. This is a gap in the log, not an idle robot.',
   };
 
-  const api = {createStore, freshness, requestedAction, receiptText, identity, motionText, motionNumbers, motionKey};
+  const api = {createStore, freshness, requestedAction, receiptText, identity, motionText, motionNumbers, motionKey, meaningfulMotion, runSummary, runOutcome, recordedRule, guardSummary, createAdmissionState};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof window !== 'undefined') window.ClawmetryWidget = api;
   if (typeof document === 'undefined') return;
 
   const store = createStore();
+  const admission = createAdmissionState();
   let root, summaryState, nodes, following = true, selected = 0, disconnected = false;
   const add = (parent, tag, content, className) => {
     const node = document.createElement(tag); if (content) node.textContent = content;
@@ -213,6 +358,7 @@
   }
   function ageLabel(value) { return value === null ? 'Source time unknown' : value < 60 ? value + 's ago' : Math.floor(value / 60) + 'm ago'; }
   function render() {
+    renderTrust();
     if (!root) return;
     const samples = store.samples, latest = store.latest;
     if (following) selected = Math.max(0, samples.length - 1);
@@ -277,17 +423,9 @@
   // the upstream `yam:conversation-mode` event is used only to fix up after
   // upstream's generic handler has also run for our button.
   const MODE = 'clawmetry';
-  let tab, tabButton, tabNodes;
-  // The move log is the default view, selected once upstream has wired its own
-  // strip. `choosing` distinguishes our own programmatic selection from a
-  // visitor's, so a visitor who picks another tab is never overridden.
-  let defaultApplied = false, visitorChose = false, choosing = false;
-  function applyDefaultMode() {
-    if (defaultApplied || visitorChose || !tabButton) return;
-    defaultApplied = true;
-    choosing = true;
-    try { tabButton.click(); } finally { choosing = false; }
-  }
+  let tab, tabButton, tabNodes, assessmentLocation = null, reviewExpanded = false;
+  // Keep the meeting UI's initial view. The optional pane opens only when the
+  // visitor selects it and status polls never change that selection.
 
   function setPressed(active) {
     for (const button of document.querySelectorAll('[data-conversation-mode]')) {
@@ -295,7 +433,9 @@
     }
   }
   function showMotion(show) {
+    if (!show) setReviewExpanded(false);
     if (tab) tab.hidden = !show;
+    placeAssessment(show);
     const conversation = document.getElementById('liveConversationPanel');
     const visitors = document.getElementById('visitorChatPanel');
     if (show) {
@@ -305,6 +445,21 @@
       if (layout) layout.classList.remove('conversationClosed');
       renderMotion();
     }
+  }
+  function setReviewExpanded(expanded) {
+    if (!tab || !tabNodes?.expand) return;
+    reviewExpanded = expanded === true;
+    if (reviewExpanded) tab.classList.add('cm-review-expanded');
+    else {
+      tab.classList.remove('cm-review-expanded');
+      // CSS resizing writes inline dimensions. Restore the embedded layout
+      // without rebuilding the editor or losing its draft and scroll state.
+      tab.style.removeProperty('width'); tab.style.removeProperty('height');
+    }
+    tabNodes.expand.textContent = reviewExpanded ? 'Reduce review' : 'Expand review';
+    tabNodes.expand.setAttribute('aria-expanded', String(reviewExpanded));
+    tabNodes.resizeHint.hidden = !reviewExpanded;
+    tabNodes.tools.hidden = !reviewExpanded;
   }
   function buildTab() {
     if (tab || document.getElementById('clawmetryMotionPanel')) return;
@@ -326,9 +481,9 @@
     tab.className = 'panel cm-motion-panel';
     tab.hidden = true;
     tab.tabIndex = -1;
-    tab.setAttribute('aria-label', 'ClawMetry move log');
+    tab.setAttribute('aria-label', 'ClawMetry run review');
     // Collaboration lockup: ClawMetry's own mark beside BluPe's wordmark, in
-    // BluPe's own type. Neither brand is redrawn or recoloured.
+    // BluPe's own type. The wordmark uses a light foreground on this dark pane.
     const brand = add(tab, 'div', '', 'cm-brand');
     brand.setAttribute('role', 'img');
     brand.setAttribute('aria-label', 'ClawMetry and BluPe');
@@ -339,54 +494,176 @@
     add(brand, 'span', '×', 'cm-brand-x').setAttribute('aria-hidden', 'true');
     add(brand, 'span', 'BluPe', 'cm-brand-blupe').setAttribute('aria-hidden', 'true');
     const header = add(tab, 'div', '', 'statusHeader');
-    add(header, 'h2', 'Move log');
-    tabNodes = {state: add(header, 'span', 'Waiting for a run', 'tag')};
-    // A control that cannot work must say why rather than quietly do nothing,
-    // so the link only appears once the server supplies a detail path for the
-    // displayed run, and the note beside it explains the usual reason it has not.
-    tabNodes.detail = add(header, 'a', 'Open detailed view ↗', 'cm-motion-detail');
-    tabNodes.detail.target = '_blank';
-    tabNodes.detail.rel = 'noopener noreferrer';
-    tabNodes.detail.hidden = true;
-    tabNodes.detailNote = add(header, 'span', '', 'cm-motion-detail-note');
-    tabNodes.detailNote.hidden = true;
-    tabNodes.scope = add(tab, 'p', '', 'help');
-    tabNodes.list = add(tab, 'ol', '', 'cm-motion-list');
-    tabNodes.list.tabIndex = 0;
-    tabNodes.list.setAttribute('aria-label', 'Robot move log');
-    tabNodes.list.setAttribute('aria-live', 'polite');
-    tabNodes.list.setAttribute('aria-relevant', 'additions');
-    tabNodes.empty = add(tab, 'p', '', 'help');
-    add(tab, 'p', 'Packets, waypoints and measured reports from the station’s own run journal. ' +
-      'Model notes and prompts are not shown here and keep their separate sharing choice. ' +
-      'A reported waypoint is what the gateway said; it does not by itself confirm the arm moved.', 'cm-evidence-limits');
-    // The published-run evidence lives here as a section, not as a second panel.
-    build(tab);
+    add(header, 'h2', 'Live activity');
+    tabNodes = {state:null};
+    tabNodes.phase=add(header,'span','No active run','cm-run-phase');tabNodes.phase.id='cm-run-phase';
+    tabNodes.phase.setAttribute('role','status');tabNodes.phase.setAttribute('aria-live','polite');
+    tabNodes.detail = add(header, 'a', 'Review run ↗', 'cm-motion-detail');
+    tabNodes.detail.target = '_blank'; tabNodes.detail.rel = 'noopener noreferrer'; tabNodes.detail.hidden = true;
+    const sessions=add(header,'a','Sessions','cm-sessions-link');sessions.href='/clawmetry/';
+    tabNodes.outcome=add(tab,'section','','cm-run-outcome');tabNodes.outcome.id='cm-run-outcome';
+    tabNodes.outcome.setAttribute('aria-label','Recorded run outcome');
+    tabNodes.outcomeContext=add(tabNodes.outcome,'p','Recorded robot run','cm-outcome-context');tabNodes.outcomeContext.id='cm-run-outcome-context';
+    tabNodes.outcomeTitle=add(tabNodes.outcome,'h3','Unverified');tabNodes.outcomeTitle.id='cm-run-outcome-title';
+    tabNodes.outcomeTitle.setAttribute('role','status');tabNodes.outcomeTitle.setAttribute('aria-live','polite');
+    tabNodes.outcomeDetail=add(tabNodes.outcome,'p','No run outcome is recorded.');tabNodes.outcomeDetail.id='cm-run-outcome-detail';
+    tabNodes.outcomeRule=add(tabNodes.outcome,'p','','cm-outcome-rule');tabNodes.outcomeRule.id='cm-run-outcome-rule';
+    const tools = add(tab, 'div', '', 'cm-review-tools');
+    tabNodes.tools=tools;tools.hidden=true;
+    tabNodes.expand = add(tools, 'button', 'Expand review', 'cm-review-expand');
+    tabNodes.expand.id = 'cm-expand-review'; tabNodes.expand.type = 'button';
+    tabNodes.expand.setAttribute('aria-controls', tab.id);
+    tabNodes.expand.setAttribute('aria-expanded', 'false');
+    tabNodes.expand.addEventListener('click', () => setReviewExpanded(!reviewExpanded));
+    tab.append(tabNodes.expand);
+    tabNodes.resizeHint = add(tools, 'span', 'Drag the lower-right corner to resize. Esc to reduce.', 'cm-resize-hint');
+    tabNodes.resizeHint.hidden = true;
+    tab.addEventListener('keydown', event => {
+      if (reviewExpanded && event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); setReviewExpanded(false);
+        tabNodes.expand.focus({preventScroll:true});
+      }
+    });
+    const scroll = add(tab, 'div', '', 'cm-trust-scroll'); scroll.id = 'cm-trust-scroll';
+    // Keep Expand reachable in short panels; the result leads the scroll body.
+    scroll.append(tabNodes.outcome);
+    scroll.tabIndex = 0; scroll.setAttribute('aria-label','Run review and robot rules');
+    tabNodes.detailNote = add(scroll, 'p', '', 'cm-motion-detail-note'); tabNodes.detailNote.hidden = true;
+    const editor = add(scroll,'div','','cm-guard-editor-slot'); editor.id='cm-guard-editor-slot';
+    const activity=add(scroll,'section','','cm-recent-section');activity.setAttribute('aria-label','Live robot activity');
+    tabNodes.liveTask=add(activity,'p','','cm-live-task');
+    tabNodes.guardNotice=add(activity,'div','','cm-guard-notice');tabNodes.guardNotice.hidden=true;
+    tabNodes.guardNoticeTitle=add(tabNodes.guardNotice,'strong');
+    tabNodes.guardNoticeDetail=add(tabNodes.guardNotice,'p');
+    tabNodes.recent = add(activity,'ol','','cm-recent-events');tabNodes.recent.id='cm-recent-events';
+    tabNodes.recent.setAttribute('aria-label','Recent robot activity');
+    tabNodes.empty = add(activity,'p','','cm-activity-empty');
+    scroll.append(editor);
+    const technical=add(scroll,'details','','cm-technical-activity');technical.id='cm-technical-activity';
+    tabNodes.technicalSummary=add(technical,'summary','Details');
+    const overview = add(technical,'section','','cm-run-summary'); overview.id='cm-run-summary';
+    overview.setAttribute('aria-label','Recorded run summary');
+    tabNodes.state = add(overview,'h3','No active run','cm-run-state');
+    tabNodes.task = add(overview,'p','','cm-run-task');
+    tabNodes.explanation = add(overview,'p','','cm-trust-explanation');
+    const facts = add(overview,'dl','','cm-trust-facts');
+    for(const [key,label] of [['guard','Guard'],['recording','Recording'],['request','Requested'],['measured','Measured']]) {
+      add(facts,'dt',label);tabNodes[key]=add(facts,'dd');
+    }
+    tabNodes.guard.id='cm-guard-state';
+    tabNodes.guardDetail=add(overview,'p','','cm-guard-explanation');
+    tabNodes.scope=add(technical,'p','','help');
+    tabNodes.list=add(technical,'ol','','cm-motion-list');tabNodes.list.id='cm-technical-events';
+    tabNodes.list.setAttribute('aria-label','Robot move log');
+    add(technical,'p','Requests, gateway receipts and measured reports are separate evidence. A packet decision does not confirm task success or physical stopping.','cm-evidence-limits');
+    build(technical);
+    tabNodes.assessment=add(scroll,'section','','cm-operator-assessment');tabNodes.assessment.id='cm-operator-assessment';tabNodes.assessment.hidden=true;
+    add(tabNodes.assessment,'p','Your assessment is separate from the recorded evidence.','cm-assessment-caption');
     conversation.insertAdjacentElement('afterend', tab);
+    document.getElementById('meetingClosePanel')?.addEventListener('click', () => setReviewExpanded(false));
+    renderTrust();
+    if (typeof CustomEvent === 'function') document.dispatchEvent(new CustomEvent('clawmetry:panel-ready'));
 
     // Upstream's handler also fires for our button and would re-show its own
     // panel; it dispatches this event last, so we settle the state here.
     document.addEventListener('yam:conversation-mode', event => {
       const mode = event.detail && event.detail.mode;
-      // A selection we did not make is the visitor's; never override it later.
-      if (!choosing) { visitorChose = true; defaultApplied = true; }
       if (mode === MODE) showMotion(true); else showMotion(false);
     });
-    // Upstream wires the strip from its own deferred script, so select the
-    // default after this task rather than during construction.
-    setTimeout(applyDefaultMode, 0);
   }
   function renderDetailLink() {
     if (!tabNodes) return;
     const view = store.latest;
     const path = typeof view?.detail_path === 'string' && /^\/clawmetry\/trace\/[0-9a-f]{32}$/.test(view.detail_path) ? view.detail_path : null;
-    tabNodes.detail.hidden = !path;
-    tabNodes.detailNote.hidden = !!path;
-    if (path) { tabNodes.detail.href = path; tabNodes.detailNote.textContent = ''; }
-    else {
+    // A finished run's trace is still served, so when nothing is live the
+    // reader's own last run is offered instead -- labelled as the past run it
+    // is, never dressed up as the run the station is showing.
+    const recent = !path && view && view.recent_detail ? view.recent_detail : null;
+    const target = path || (recent ? recent.path : null);
+    tabNodes.detail.hidden = !target;
+    tabNodes.detailNote.hidden = !!target;
+    if (target) {
+      tabNodes.detail.href = target;
+      const live=path&&['running','preparing','queued'].includes(view?.run?.status);
+      tabNodes.detail.textContent = admission.current() ? 'Previous run \u2197' : live ? 'Open live trace \u2197' : path ? 'Open run \u2197' : 'Last run \u2197';
+      tabNodes.detail.title = admission.current() ? 'This opens a previous robot run. The current request was not queued.' : path ? '' :
+        'The run this station is showing now is not yours. This opens the last run you started'
+        + (recent && recent.task ? ': ' + recent.task : '.');
+      tabNodes.detailNote.textContent = '';
+    } else {
       tabNodes.detail.removeAttribute('href');
-      tabNodes.detailNote.textContent = 'Detailed view available to the browser that launched the run, when detailed capture was chosen for it.';
+      tabNodes.detail.textContent = 'Review run \u2197';
+      tabNodes.detail.title = '';
+      tabNodes.detailNote.textContent = '';
+      tabNodes.detailNote.hidden = true;
     }
+  }
+  function placeAssessment(show) {
+    const assessment=document.getElementById('liveAssessment');
+    if (!tabNodes?.assessment || !assessment) return;
+    const parent=assessment.parentElement || assessment.parent;
+    if (show) {
+      if (parent!==tabNodes.assessment) {
+        assessmentLocation={node:assessment,parent,next:assessment.nextSibling || null};
+        tabNodes.assessment.append(assessment);
+      }
+      tabNodes.assessment.hidden=assessment.hidden===true;
+    } else if (!show && assessmentLocation && parent===tabNodes.assessment) {
+      const original=assessmentLocation;
+      if (original.next && (original.next.parentElement || original.next.parent)===original.parent) original.parent.insertBefore(assessment,original.next);
+      else original.parent.append(assessment);
+      assessmentLocation=null;tabNodes.assessment.hidden=true;
+    }
+  }
+  function renderTrust() {
+    if (!tabNodes) return;
+    const view=store.latest, rows=store.motion, summary=runSummary(view,rows,{disconnected});
+    const current=runSummary(view,rows,{disconnected,currentRunOnly:true});
+    tabNodes.phase.textContent=current.title;tabNodes.phase.title=current.detail;
+    const local=admission.current(), outcome=local || current.outcome;
+    const hasRun=view?.run?.present===true;
+    const ended=['stopped','complete','completed','resetting','failed','timed_out','safety_aborted'].includes(view?.run?.status);
+    tabNodes.outcome.hidden=!(local || hasRun&&(ended||outcome.category==='blocked'||outcome.category==='failed'));
+    tabNodes.outcomeContext.textContent=local?local.context:'Recorded robot run';
+    tabNodes.outcome.setAttribute('aria-label',local?'Current request outcome':'Recorded run outcome');
+    if(local) {tabNodes.phase.textContent='Request blocked before model';tabNodes.phase.title=local.detail;}
+    tabNodes.outcome.dataset.outcome=outcome.category;tabNodes.outcomeTitle.textContent=outcome.title;
+    tabNodes.outcomeDetail.textContent=outcome.detail;tabNodes.outcomeRule.textContent=outcome.rule||'';
+    tabNodes.outcomeRule.hidden=!outcome.rule;
+    tabNodes.state.textContent=(local?'Previous robot run · ':'')+summary.title;
+    tabNodes.task.textContent=view?.run?.task || (view?.run?.present ? 'Task text is not shared with this viewer.' : 'Start a task from the normal Run controls when you are ready.');
+    tabNodes.task.title=view?.run?.task || '';
+    tabNodes.explanation.textContent=store.motionSource && store.motionSource!=='station_journal' ? MOTION_SOURCE_TEXT[store.motionSource] : summary.detail;
+    const guard=guardSummary(view);tabNodes.guard.textContent=guard.title;tabNodes.guard.dataset.state=guard.tone;tabNodes.guardDetail.textContent=guard.detail;
+    tabNodes.liveTask.textContent=local?'Current request was not queued.':hasRun?(view.run.task||'Task text is private.'):'Ready when you are';
+    tabNodes.liveTask.hidden=!hasRun&&!local;
+    const recordedGuard=recordedOutcomeGuard(view);
+    tabNodes.guardNotice.hidden=!!local||!recordedGuard||outcome.category==='blocked'||outcome.category==='failed';
+    tabNodes.guardNotice.dataset.state=guard.tone;
+    tabNodes.guardNoticeTitle.textContent=recordedGuard?.state==='configured'?'Waiting for the first Guard check':guard.title;
+    tabNodes.guardNoticeDetail.textContent=recordedGuard?.state==='decision_recorded'?guard.detail:'';
+    const persistence=view?.trust?.schema==='clawmetry.trust.v1' ? view.trust.persistence : null;
+    const sequence=persistence?.through_sequence;
+    tabNodes.recording.textContent=persistence?.state==='confirmed'&&Number.isSafeInteger(sequence)&&sequence>0
+      ? 'Saved in ClawMetry'+(Number.isSafeInteger(sequence)&&sequence>=0?' through event '+sequence:'')
+      : ({recording:'Journal recording; storage not confirmed',closed:'Journal closed; storage not confirmed',disabled:'Recording disabled',incomplete:'Recording incomplete',unavailable:'Recording unavailable'}[view?.recording?.state] || 'Recording not confirmed');
+    const request=[...(view?.events || [])].reverse().find(event=>event.tools.length);
+    tabNodes.request.textContent=request ? requestedAction(request) : 'No action request shared in this view.';
+    const fresh=freshness(view),measurement=view?.measurement;
+    tabNodes.measured.textContent=measurement
+      ? (measurement.observation_kind==='station'?'Station feedback':'Session feedback')+' · '+ageLabel(fresh.age_s)+(measurement.ready===false?' · source reports not ready':measurement.settled===true?' · source reports settled':'')
+      : 'No measured feedback received.';
+    const follow=tabNodes.recent.scrollHeight-tabNodes.recent.scrollTop-tabNodes.recent.clientHeight<80;
+    tabNodes.recent.hidden=!!local;
+    tabNodes.recent.replaceChildren(...summary.recent.slice().reverse().map(row=>{
+      const item=document.createElement('li');item.dataset.kind=row.kind;
+      add(item,'span',motionText(row) || 'Recorded event');
+      const stamp=add(item,'time',new Date(row.t*1000).toLocaleTimeString());stamp.dateTime=new Date(row.t*1000).toISOString();return item;
+    }));
+    if(follow)tabNodes.recent.scrollTop=tabNodes.recent.scrollHeight;
+    tabNodes.empty.textContent=local?'Edit the task, then send it again.':hasRun?'Waiting for the next robot update…':'Send a task to start the live trace.';
+    tabNodes.empty.hidden=summary.recent.length>0&&!local;
+    if(tab && !tab.hidden)placeAssessment(true);
   }
   function renderMotion() {
     renderDetailLink();
@@ -394,11 +671,7 @@
     const rows = store.motion, source = store.motionSource;
     tabNodes.scope.textContent = MOTION_SOURCE_TEXT[source] ||
       'No run is published on this station yet. The move log fills as soon as one starts.';
-    tabNodes.state.textContent = !source ? 'Waiting for a run'
-      : source === 'station_journal' ? rows.length + ' entries' : 'Not available here';
-    tabNodes.empty.textContent = rows.length ? ''
-      : source === 'station_journal' ? 'No moves recorded for this run yet.' : '';
-    tabNodes.empty.hidden = !tabNodes.empty.textContent;
+    tabNodes.technicalSummary.textContent = 'Trace details' + (rows.length ? ' · '+rows.length+' records' : '');
     const follow = tabNodes.list.scrollHeight - tabNodes.list.scrollTop - tabNodes.list.clientHeight < 80;
     tabNodes.list.replaceChildren(...rows.map(row => {
       const item = document.createElement('li');
@@ -415,17 +688,22 @@
   }
 
   const observer = {
-    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) following = true; disconnected = false; buildTab(); applyDefaultMode(); render(); if (moved) renderMotion(); else renderDetailLink(); },
-    reset() { store.clear(); following = true; disconnected = false; render(); renderMotion(); },
+    observe(view) { if (!view || view.schema !== 'yam.telemetry.v1') return; const before = store.latest && identity(store.latest); store.update(view); const moved = store.updateMotion(view); if (before !== identity(view)) { following = true; if(before)admission.clear(); } disconnected = false; buildTab(); render(); if (moved) renderMotion(); else renderDetailLink(); },
+    reset() { admission.clear(); store.clear(); following = true; disconnected = false; render(); renderMotion(); },
     connection(view) { if (!store.latest || store.latest.robot_id === view.robot_id) { disconnected = true; render(); } },
   };
   window.yamTelemetry = observer;
-  window.addEventListener('blupe-robot-selected', () => observer.reset());
+  for(const [name,action] of [['yam:run-submitting','start'],['yam:run-accepted','accept'],['yam:run-rejected','reject'],['yam:run-cleared','clear']]) {
+    window.addEventListener(name,event=>{const verified=admission[action](event.detail);buildTab();render();renderDetailLink();
+      if(action==='reject' && verified && tabButton){tabButton.click();const body=document.getElementById('cm-trust-scroll');if(body)body.scrollTop=0;}
+    });
+  }
+  window.addEventListener('blupe-robot-selected', () => { setReviewExpanded(false); observer.reset(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
   let clock = null;
   function startClock() { if (clock === null) clock = setInterval(() => { if (!document.hidden) render(); }, 1000); }
   window.addEventListener('pageshow', startClock);
-  window.addEventListener('pagehide', () => { clearInterval(clock); clock = null; });
+  window.addEventListener('pagehide', () => { admission.clear(); setReviewExpanded(false); clearInterval(clock); clock = null; });
   startClock();
   const start = () => { buildTab(); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true}); else start();

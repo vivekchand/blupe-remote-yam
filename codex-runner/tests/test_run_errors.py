@@ -290,6 +290,28 @@ def test_unknown_safety_error_uses_recorded_message_and_details_are_bounded():
     assert detail.startswith('ValueError: ') and len(detail) == 2000 and '\x00' not in detail
 
 
+def test_pre_dispatch_task_guard_errors_explain_the_unsubmitted_packet():
+    cases = {
+        'Installed trajectory decision refused this packet':
+            'Task Guard refused this motion packet before submission. Open the ClawMetry detailed view for the recorded reason.',
+        'Installed trajectory decision is unavailable; packet refused':
+            'Task Guard could not check this motion packet, so it was not submitted. Open the ClawMetry detailed view to inspect the run.',
+        'Installed trajectory decision is invalid; packet refused':
+            'Task Guard returned an invalid decision, so this motion packet was not submitted. Open the ClawMetry detailed view to inspect the run.',
+    }
+    for source, expected in cases.items():
+        for prefix in ('', 'RuntimeError: '):
+            assert public_run_error(dict(status='stopped', error=prefix + source)) == expected
+
+
+def test_unknown_packet_errors_keep_their_recorded_cause_and_redaction():
+    source = 'RuntimeError: Installed trajectory decision refused this packet; token=private-fixture'
+    result = public_run_error(dict(status='stopped', error=source))
+    assert result.startswith('RuntimeError: Installed trajectory decision refused this packet;')
+    assert 'private-fixture' not in result and '[redacted]' in result
+    assert public_run_error(dict(error='ValueError: Installed trajectory decision refused this packet')).startswith('ValueError: ')
+
+
 def test_dream_deadline_cancellation_is_timeout_before_gateway_terminal_event():
     import threading
     from unittest.mock import Mock, patch
@@ -351,3 +373,35 @@ def test_operator_stop_and_provider_replacement_do_not_record_deadline_cancellat
     controller._stop_event.clear()
     assert controller._provider_cancelled(object())
     assert controller._deadline_cancelled_session is None
+
+
+def test_native_abort_during_blocking_policy_preserves_recorded_cause():
+    from unittest.mock import Mock
+    from remote_yam.controller import RunnerController
+    from remote_yam.session import MockSessionAPI, SessionAPIError
+    controller = RunnerController(MockSessionAPI(), share_conversation=False)
+    controller._session_id = 'native-session'
+    controller._status = 'running'
+    controller._session_api.get_session = Mock(return_value={'status': 'safety_aborted'})
+    controller._session_api.get_episode_trace = Mock(return_value={'errors': [dict(
+        code='controller_executor_failed', message='Controller Dream execution failed',
+        details=dict(reason='invalid_receipt_order', progress=23, expected=24))]})
+    controller._session_api.stop_session = Mock()
+    controller.process_next_event = Mock(side_effect=SessionAPIError('session is not active'))
+    controller._run_loop(None)
+    state = controller.status()
+    assert state['status'] == 'safety_aborted'
+    assert state['safety_error']['code'] == 'controller_executor_failed'
+    assert state['safety_error']['details']['reason'] == 'invalid_receipt_order'
+    assert 'session is not active' not in state['error']
+    controller._session_api.stop_session.assert_not_called()
+
+
+
+def test_retained_camera_failure_names_the_input_instead_of_generic_safety():
+    state = dict(error='controller_executor_failed', safety_error=dict(category='hardware_safety',
+        details=dict(observation=dict(state='failed', field='camera_right', http_status=503,
+                                      message='private camera response'))))
+    assert public_run_error(state) == 'Run stopped: right camera frames remained unavailable (HTTP 503).'
+    state['safety_error']['details']['observation'] = dict(state='failed', field='observed_at')
+    assert public_run_error(state) == 'Run stopped: fresh robot feedback remained unavailable.'

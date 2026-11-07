@@ -4,68 +4,20 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../static/hosted.js'), 'utf8').split('\n})();')[0]+'\n})();';
-test('hover previews are muted, exclusive, and stop on exit, modal open, or robot switch', async () => {
-  const nodes = new Map(), listeners = {};
-  const element = () => ({
-    listeners:{}, children:[], dataset:{}, style:{}, open:false, plays:0, pauses:0,
-    addEventListener(name,fn){this.listeners[name]=fn}, after(){}, setAttribute(){}, removeAttribute(){},
-    append(...items){this.children.push(...items)}, appendChild(item){this.children.push(item)}, replaceChildren(){this.children=[]},
-    play(){this.plays++;return Promise.resolve()}, pause(){this.pauses++},
-    showModal(){this.open=true}, close(){this.open=false;this.listeners.close?.()}, load(){}
-  });
-  const document = {addEventListener(name,fn){listeners[name]=fn},
-    getElementById(id){if(!nodes.has(id))nodes.set(id,element());return nodes.get(id)},createElement:element};
-  const run = {episode_index:1, prompt:'Move block', camera_order:[], started_at:0,
-    video_url:'https://example.com/previews/run.mp4', compressed:true};
-  vm.runInNewContext(source, {document,window:{addEventListener(name,fn){listeners[name]=fn}},URLSearchParams,encodeURIComponent,
-    fetch:async()=>({ok:true,json:async()=>({runs:[run,{...run,compressed:false},{...run,replay_speed:2,preview_speed:10}],next_offset:null})})});
-  listeners['blupe-robot-selected']({detail:'yam-1'});
-  await new Promise(setImmediate);
-  const cards = nodes.get('pastRunsList').children.map(li=>li.children[0]);
-  const [first,second] = cards.map(card=>card.children[2]);
-  cards[0].listeners.pointerenter({pointerType:'touch'});
-  assert.equal(first.plays,0);
-  cards[0].listeners.pointerenter({pointerType:'mouse'});
-  assert.equal(first.plays,1);assert.equal(first.muted,true);assert.equal(first.loop,true);assert.equal(first.playbackRate,1);
-  cards[1].listeners.pointerenter({pointerType:'mouse'});
-  assert.equal(first.pauses,1);assert.equal(second.playbackRate,10);
-  cards[1].listeners.pointerleave();assert.equal(second.pauses,1);
-  cards[2].listeners.pointerenter({pointerType:'mouse'});
-  const dream=cards[2].children.find(child=>child.preload==='metadata');
-  assert.equal(dream.playbackRate,.2);assert.equal(dream.src,run.video_url);
-  cards[0].listeners.pointerenter({pointerType:'mouse'});
-  cards[0].listeners.click();assert.equal(first.pauses,2);assert.equal(nodes.get('pastRunDialog').open,true);
-  cards[1].listeners.pointerenter({pointerType:'mouse'});assert.equal(second.plays,1);
-  nodes.get('pastRunDialog').close();
-  cards[0].listeners.pointerenter({pointerType:'mouse'});
-  document.hidden=true;listeners.visibilitychange();assert.equal(first.pauses,3);
-  document.hidden=false;cards[0].listeners.pointerenter({pointerType:'mouse'});
-  listeners['blupe-robot-selected']({detail:'so101'});assert.equal(first.pauses,4);
-  await new Promise(setImmediate);
-});
-test('history waits for robot selection and ignores a previous robot response', async () => {
-  const nodes = new Map(), listeners = {}, requests = [];
-  const element = () => ({style:{},appendChild(){},addEventListener(){},after(){},replaceChildren(){},removeAttribute(){},dataset:{},open:false});
-  const document = {addEventListener(){},getElementById(id){if(!nodes.has(id))nodes.set(id,element());return nodes.get(id)},createElement:element};
-  vm.runInNewContext(source, {document,window:{addEventListener(name,fn){listeners[name]=fn}},URLSearchParams,encodeURIComponent,
-    fetch(url,options){return new Promise(resolve=>requests.push({url,options,resolve}))}});
-  assert.equal(requests.length,0);
-  listeners['blupe-robot-selected']({detail:'robot-3652c537a175cbae'});
-  assert.match(requests[0].url,/robot_id=robot-3652c537a175cbae/);
-  assert.match(nodes.get('datasetViewer').src,/lerobot-visualize-dataset\.hf\.space\/andlyu\/Public-MakerMods-SO101-runs\/episode_0$/);
-  assert.match(nodes.get('datasetLink').href,/visualize_dataset\?path=.*Public-MakerMods-SO101-runs/);
-  assert.equal(requests[0].options.headers['X-Blupe-Robot'],'robot-3652c537a175cbae');
-  listeners['blupe-robot-selected']({detail:'so101'});
-  assert.match(requests[1].url,/offset=0&robot_id=so101/);
-  requests[0].resolve({ok:true,json:async()=>({runs:[],next_offset:12})});
-  await new Promise(setImmediate);
-  assert.equal(nodes.get('pastRunsStatus').textContent,'Loading past runs…');
-  assert.equal(nodes.get('refreshPastRuns').disabled,true);
-  requests[1].resolve({ok:true,json:async()=>({runs:[],next_offset:null})});
-  nodes.get('pastRunsList').children=[];
-  await new Promise(setImmediate);
-  assert.equal(nodes.get('pastRunsStatus').textContent,'No published runs yet.');
-  assert.equal(nodes.get('refreshPastRuns').disabled,false);
+test('Table recording blocks wait for robot selection, ignore stale responses and open shared details', async () => {
+  const c = require('./helpers/past-runs.cjs')('','table',null,false);
+  assert.equal(c.requests.length,0);
+  c.events['blupe-robot-selected']({detail:'robot-3652c537a175cbae'});
+  assert.match(c.requests[0].url,/api\/run-catalog/);
+  assert.doesNotMatch(c.requests[0].url,/[?&]robot_id=/);
+  assert.match(c.nodes.get('datasetViewer').src,/Public-MakerMods-SO101-runs/);
+  c.events['blupe-robot-selected']({detail:'so101'});
+  c.answer(c.requests[0],[],100,101); await c.flush();
+  assert.equal(c.nodes.get('pastRunsStatus').textContent,'Loading past runs…');
+  const run={episode_id:'ep_one',prompt:'Move block',started_at:1,model:'M'};
+  c.answer(c.requests[1],[run]);await c.flush();
+  const row=c.nodes.get('pastRunsList').children[0];
+  row.children[0].emit('click');assert.equal(c.opened[0].id,'ep_one');
 });
 
  test('robot switching uses browser history even with a local history function', async () => {
@@ -80,4 +32,94 @@ test('history waits for robot selection and ignores a previous robot response', 
     start:async()=>{started++;}, csrf:'',active:false,ended:false,lastChatSnapshot:''};
   await vm.runInNewContext('(async()=>{'+handler+'})()',context);
   assert.equal(replaced,1); assert.equal(started,1);
+});
+
+test('incumbent previews are muted, exclusive and pause on replay, view switch, exit and hidden page',async()=>{
+  const c=require('./helpers/past-runs.cjs')('','table');
+  c.events['blupe-robot-selected']({detail:'yam-1'});
+  const run={episode_id:'ep_one',episode_index:1,prompt:'Move block',started_at:1,model:'M',
+    video_url:'https://example.com/previews/one.mp4',original_video_url:'https://example.com/videos/one.mp4',
+    camera_order:['top','left','right'],video_layout:'observer-focus',compressed:true};
+  c.answer(c.requests[0],[run,{...run,episode_id:'ep_two',video_url:'https://example.com/previews/two.mp4'}]);await c.flush();
+  const cards=c.nodes.get('pastRunsList').children.map(item=>item.children[0]);
+  const videos=cards.map(card=>card.children.find(child=>child.tag==='video'));
+  cards[0].emit('pointerenter',{pointerType:'touch'});assert.equal(videos[0].plays,0);
+  cards[0].emit('pointerenter',{pointerType:'mouse'});assert.equal(videos[0].plays,1);
+  assert.equal(videos[0].muted,true);assert.equal(videos[0].playbackRate,1);
+  cards[1].emit('focus');assert.equal(videos[0].pauses,1);assert.equal(videos[1].plays,1);
+  cards[1].emit('pointerleave');assert.equal(videos[1].pauses,1);
+  cards[0].emit('click');assert.equal(c.nodes.get('pastRunVideo').src,run.video_url);assert.equal(c.nodes.get('pastRunDialog').open,true);
+  cards[0].emit('pointerenter',{pointerType:'mouse'});assert.equal(videos[0].plays,1,'Modal playback suppresses hover previews');
+  c.nodes.get('pastRunDialog').close();cards[0].emit('pointerenter',{pointerType:'mouse'});
+  const before=videos[0].pauses;c.document.hidden=true;c.events.visibilitychange();assert.equal(videos[0].pauses,before+1);c.document.hidden=false;
+  const played=videos[0].plays;c.window.matchMedia=()=>({matches:true});cards[0].emit('pointerenter',{pointerType:'mouse'});assert.equal(videos[0].plays,played,'Reduced motion disables autoplay previews');c.window.matchMedia=()=>({matches:false});
+  cards[0].emit('pointerenter',{pointerType:'mouse'});
+  c.nodes.get('pastRunsCloudView').emit('click');assert.ok(videos[0].pauses>=2);
+});
+
+test('recording blocks retain reason, assessment text and the live-speed replay action',async()=>{
+ const c=require('./helpers/past-runs.cjs')('','table');c.events['blupe-robot-selected']({detail:'yam-1'});
+ const run={episode_id:'ep_one',episode_index:1,prompt:'Move block',started_at:1,model:'M',
+   video_url:'https://example.com/previews/one.mp4',original_video_url:'https://example.com/videos/one.mp4',camera_order:[],
+   result:'Stopped',ending_reason:'Time limit',assessment:{label:'Success',correct:1,incorrect:2,eligibility:'excluded'}};
+ c.answer(c.requests[0],[run]);await c.flush();
+ const block=c.nodes.get('pastRunsList').children[0];
+ const reason=block.children.find(child=>child.tag==='details');
+ assert.equal(reason.children[1].textContent,'Ending reason: Time limit');
+ assert.match(block.children.find(child=>child.className==='pastRunAssessment help').textContent,/Runner: Success · excluded · 1 correct \/ 2 incorrect/);
+ block.children.find(child=>child.tag==='button' && child.textContent==='Live speed').emit('click');
+ assert.equal(c.nodes.get('pastRunVideo').src,run.original_video_url);assert.equal(c.nodes.get('pastRunVideo').playbackRate,1);
+});
+
+test('hosted cloud connects hover playback, loads only matching robot details and stops on hide',async()=>{
+ const c=require('./helpers/past-runs.cjs')('', 'cloud');
+ assert.ok(c.cloudPreview.options,'controller must create the actual preview player');
+ c.events['blupe-robot-selected']({detail:'yam-1'});
+ c.answer(c.requests[0],[]);await c.flush();
+ const run={episode_id:'ep_hover',robot_id:'yam-1',prompt:'Hover task'},point={x:100,y:100,width:1000,height:540};
+ c.cloud.preview(run,point);assert.equal(c.cloudPreview.shows.at(-1)[0],run);
+ const loading=c.cloudPreview.options.loadRun(run,new AbortController().signal),request=c.requests.at(-1);
+ assert.match(request.url,/episode_id=ep_hover&robot_id=yam-1/);
+ c.answer(request,[{...run,video_url:'https://example/clip.mp4',compressed:true}]);assert.equal((await loading).video_url,'https://example/clip.mp4');
+ const count=c.requests.length;await c.cloudPreview.options.loadRun(run,new AbortController().signal);assert.equal(c.requests.length,count,'warm detail is cached');
+ assert.equal(c.cloudPreview.options.canPlay(),true);c.nodes.get('pastRunDialog').open=true;
+ assert.equal(c.cloudPreview.options.canPlay(),false,'modal playback has priority');
+ c.nodes.get('pastRunDialog').classList={contains:name=>name==='runSidebar'};assert.equal(c.cloudPreview.options.canPlay(),true,'nonmodal sidebar preserves dot hover');
+ const hides=c.cloudPreview.hides;c.document.hidden=true;c.events.visibilitychange();assert.ok(c.cloudPreview.hides>hides);assert.equal(c.cloudPreview.options.canPlay(),false);
+});
+
+test('native preparation updates its block without losing loaded pages and aborts stale detail requests',async()=>{
+ const c=require('./helpers/past-runs.cjs')('','table');c.document.body={dataset:{stationLocal:'true'}};
+ c.events['blupe-robot-selected']({detail:'yam-1'});
+ assert.equal(c.nodes.get('datasetViewer').src,undefined,'Native view never assigns the hosted viewer');
+ const run={episode_id:'ep_one',robot_id:'yam-1',prompt:'Native task',started_at:1,
+   video_status:'processing',video_url:null,camera_order:['top','left','right'],original_available:false};
+ c.answer(c.requests[0],[run],12,13);await c.flush();
+ const block=c.nodes.get('pastRunsList').children[0],card=block.children[0];
+ const video=card.children.find(child=>child.tag==='video');
+ assert.equal(video.src,undefined);card.emit('pointerenter',{pointerType:'mouse'});assert.equal(video.plays,0);
+ c.nodes.get('morePastRuns').emit('click');c.answer(c.requests[1],[{...run,episode_id:'ep_two'}]);await c.flush();
+ assert.equal(c.nodes.get('pastRunsList').children.length,2);
+ const poll=[...c.timers.values()][0];poll();
+ c.answer(c.requests[2],[{...run,video_status:'ready',video_url:'/api/native-runs/ep_one/real.mp4',original_available:true}]);await c.flush();
+ assert.equal(c.nodes.get('pastRunsList').children.length,2);assert.match(video.src,/native-runs/);
+ const pending=[...c.timers.values()][1];pending();const request=c.requests[3];
+ c.events['blupe-robot-selected']({detail:'other'});assert.equal(request.options.signal.aborted,true);
+ c.answer(request,[{...run,video_status:'ready',video_url:'stale.mp4'}]);await c.flush();
+ assert.equal(c.nodes.get('pastRunsList').children.length,0);
+});
+
+test('unavailable native replay never promises ongoing live-speed processing and details remain usable',async()=>{
+ const c=require('./helpers/past-runs.cjs')('','table');c.events['blupe-robot-selected']({detail:'yam-1'});
+ const run={episode_id:'ep_one',robot_id:'yam-1',prompt:'Native task',started_at:1,
+   video_status:'unavailable',video_url:null,camera_order:[],original_available:false};
+ c.answer(c.requests[0],[run,{...run,episode_id:'ep_two',video_status:'processing'}]);await c.flush();
+ const blocks=c.nodes.get('pastRunsList').children;
+ const live=block=>block.children.find(child=>child.tag==='button' && child!==block.children[0]);
+ assert.equal(live(blocks[0]).textContent,'Live speed unavailable');assert.equal(live(blocks[0]).disabled,true);
+ blocks[0].children[0].emit('click');assert.equal(c.opened[0].id,'ep_one');
+ assert.equal(live(blocks[1]).textContent,'Live speed processing…');
+ [...c.timers.values()][0]();c.answer(c.requests[1],[{...run,episode_id:'ep_two'}]);await c.flush();
+ assert.equal(live(blocks[1]).textContent,'Live speed unavailable');assert.equal(live(blocks[1]).disabled,true);
+ assert.equal(blocks[1].children[0].children.find(child=>child.className==='pastRunWatch').textContent,'View run details');
 });

@@ -111,3 +111,39 @@ def test_tokens_and_identifiers_are_bounded():
 def test_non_sequence_input_is_survivable():
     for value in (None, 'events', 42, {'events': []}):
         assert project_motion(value) == []
+
+
+def test_selected_upstream_cadence_survives_float_normalization():
+    for rate in (10.0, 20.0, 30.0):
+        row=project_motion([event(1, 'packet_submit', cadence_hz=rate)])[0]
+        assert row['cadence_hz']==rate
+    for rate in (True, '20', 15, float('nan'), float('inf')):
+        assert 'cadence_hz' not in project_motion([event(1, 'packet_submit', cadence_hz=rate)])[0]
+
+
+def recovery(**changes):
+    values = dict(state='replanning', reason_code='pre_dispatch_pose_changed', retry_count=1,
+        retry_limit=2, step_id=8, trajectory_id='traj_8', dispatched=False, executed_waypoints=0)
+    values.update(changes)
+    return values
+
+
+def test_plan_recovery_is_fixed_typed_progress_without_private_text_or_motion_claims():
+    row = project_motion_event(event(1, 'plan_recovery', **recovery(), message='PRIVATE',
+        error='PRIVATE_ERROR', targets=['PRIVATE_TARGET'], status='PRIVATE_STATUS', feedback={'private':'PRIVATE'}))
+    assert row == dict(id=1, t=1001., kind='plan_recovery', **recovery())
+    assert 'PRIVATE' not in json.dumps(row)
+    assert project_motion_event(event(2, 'plan_recovery', **recovery(state='exhausted', retry_count=2)))['state'] == 'exhausted'
+    journal = [event(index, 'plan_recovery', **recovery()) for index in range(1, 251)]
+    assert len(project_motion(journal)) == MAX_ROWS
+
+
+@pytest.mark.parametrize('field,value', [
+    ('state','PRIVATE_STATE'), ('reason_code','PRIVATE_REASON'), ('retry_count', True),
+    ('retry_count',-1), ('retry_count',3), ('retry_limit',True), ('retry_limit',3),
+    ('step_id',True), ('step_id',-1), ('step_id',10**10), ('trajectory_id','PRIVATE prose'),
+    ('trajectory_id','x'*161), ('dispatched',True), ('dispatched',0),
+    ('executed_waypoints',False), ('executed_waypoints',1),
+])
+def test_malformed_or_not_zero_dispatch_recovery_is_dropped(field,value):
+    assert project_motion_event(event(1, 'plan_recovery', **recovery(**{field:value}))) is None

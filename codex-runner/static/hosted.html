@@ -3,31 +3,39 @@
 <head>
   <script src="/static/camera-preview.js" async fetchpriority="high"></script>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>BluPe · Run a policy</title><link rel="stylesheet" href="/static/hosted.css">
+  <title>BluPe · Run a policy</title><link rel="stylesheet" href="/static/hosted.css?v=endpoint-highlight-20261029">
   <script src="/static/hls.min.js" defer></script>
   <script src="/synchronized/reader.js" defer></script>
   <script src="/static/robot-audio.js" defer></script>
   <link rel="stylesheet" href="/static/robot-audio.css">
   <!-- application-head -->
+  <link rel="stylesheet" href="/static/meeting.css?v=20261031">
   <script src="/static/stream-health.js" defer></script>
+  <script src="/static/live-viewers.js" defer></script>
   <script src="/static/model-picker.js" defer></script>
   <script src="/static/system-prompt.js" defer></script>
   <script src="/static/reactions.js" defer></script>
   <script src="/static/replay-email.js" defer></script>
-  <script src="/static/hosted.js" defer></script>
+  <script src="/static/run-labels.js" defer></script>
+  <link rel="stylesheet" href="/static/run-data-chat.css">
+  <script src="/static/run-data-chat.js" defer></script>
+  <script src="/static/task-cloud.js" defer></script>
+  <script src="/static/run-assessments.js" defer></script>
+  <script src="/static/hosted.js?v=endpoint-highlight-20261029" defer></script>
+  <script src="/static/meeting.js?v=20261031" defer></script>
   <script src="/static/replay-history.js" defer></script>
   <script src="/static/replay-progress.js" defer></script>
 </head>
 <body class="playgroundConsole"><main><div class="runnerContent">
   <div class="playgroundHeader">
     <section class="intro">
-      <div class="playgroundTitle"><h1><span class="consoleWordmark">BluPe</span> <span class="consoleProduct">Playground</span></h1><a class="playgroundApiLink" href="https://github.com/andlyu/blupe-remote-yam" target="_blank" rel="noopener noreferrer">API</a></div>
+      <div class="playgroundTitle"><h1><span class="consoleWordmark">BluPe</span> <span class="consoleProduct">Playground</span></h1><a class="playgroundApiLink" href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API</a></div>
       <p id="simulationNotice" class="eyebrow" hidden>Local simulation · no physical robot connected</p>
     </section>
-    <nav class="robotNavigation" aria-label="Robot selection"><label for="robotSelector">Robot</label><select id="robotSelector" disabled><option>YAM</option></select><span id="robotSelectorStatus" class="help" role="status"></span></nav>
+    <nav class="robotNavigation" aria-label="Robot selection"><label for="robotSelector">Robot</label><select id="robotSelector" disabled><option value="">Loading robots…</option></select><span id="robotSelectorStatus" class="help" role="status"></span></nav>
 
   </div>
-  <p class="playgroundIntro">Control real robot arms with AI. Watch, prompt, and run. <a href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API docs</a> · <a href="https://github.com/andlyu/blupe-remote-yam#run-the-blupe-playground-locally" target="_blank" rel="noopener noreferrer">Run locally</a> · <a href="https://github.com/andlyu/blupe-remote-yam/blob/main/codex-runner/docs/aspire/README.md" target="_blank" rel="noopener noreferrer">ASPIRE README</a></p>
+  <p class="playgroundIntro">Control real robot arms with AI. Watch, prompt, and run. <a href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API docs</a> · <a href="https://github.com/andlyu/blupe-remote-yam#run-the-blupe-playground-locally" target="_blank" rel="noopener noreferrer">Run locally</a></p>
   <dialog id="codexInstructions" aria-labelledby="codexInstructionsTitle">
     <div class="codexDialogHeader"><h2 id="codexInstructionsTitle">Run locally through a subscription</h2><form method="dialog"><button class="codexDialogClose" aria-label="Close Codex instructions"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form></div>
     <div class="codexPromptLabel"><p>Paste this into your coding assistant</p></div>
@@ -36,13 +44,12 @@
   </dialog>
   <div class="watchLayout">
   <div class="watchToolbar">
-    <div class="conversationModes" role="group" aria-label="Conversation display">
-    <button type="button" data-conversation-mode="reasoning" aria-pressed="true" aria-controls="liveConversationPanel">Astra decision notes</button>
-    <button type="button" data-conversation-mode="conversation" aria-pressed="false" aria-controls="liveConversationPanel">Convo mode</button>
+    <div class="conversationModes" role="group" aria-label="Chat views">
+    <button type="button" data-conversation-mode="reasoning" aria-pressed="true" aria-controls="liveConversationPanel">Astra notes</button>
     <button type="button" data-conversation-mode="hide" aria-pressed="false" aria-controls="liveConversationPanel">Hide</button>
     <button type="button" data-conversation-mode="visitor" aria-pressed="false" aria-controls="visitorChatPanel">Visitor chat</button>
   </div>
-    <p class="help" id="videoDelayNotice">Live views, synchronized. <span id="streamHealth" class="streamHealth" role="status">Checking stream</span> <span id="streamHealthDetail" aria-live="off"></span> <span id="streamLatency" hidden title="Approximate age from the relay’s post-read capture timestamp to this browser canvas; assumes synchronized clocks."></span></p>
+    <p class="help" id="videoDelayNotice">Live views, synchronized. <span id="streamHealth" class="streamHealth" role="status">Checking stream</span> <span id="streamHealthDetail" aria-live="off"></span> <span id="streamLatency" hidden title="Approximate age from the relay’s post-read capture timestamp to this browser canvas; assumes synchronized clocks."></span> <span id="liveViewerCount" class="liveViewerCount" hidden title="Active browsers viewing this robot in the last 30 seconds. Includes you; multiple tabs count once."><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg><span id="liveViewerCountText"></span></span></p>
   </div>
 <div class="watchVisuals">
   <section class="panel" aria-label="What’s running" hidden>
@@ -56,8 +63,9 @@
     <figure class="syncTile"><div class="syncTilePicture"><canvas data-sync-tile="2" width="640" height="360" aria-label="Left robot camera"></canvas><button class="expandCamera" data-expand-camera="2" aria-label="Expand left camera">⛶</button></div><figcaption>Left <span data-sync-status>Connecting</span></figcaption></figure>
     <figure class="syncTile"><div class="syncTilePicture"><canvas data-sync-tile="3" width="640" height="360" aria-label="Right robot camera"></canvas><button class="expandCamera" data-expand-camera="3" aria-label="Expand right camera">⛶</button></div><figcaption>Right <span data-sync-status>Connecting</span></figcaption></figure>
     <figure class="syncSource" aria-hidden="true"><img data-camera="synchronized" alt="Synchronized camera source"><figcaption><span>Connecting</span></figcaption></figure>
-    <div class="liveStopwatch">
-      <span id="runTimer" role="timer" aria-label="Current run time remaining" aria-describedby="runTimerDetail" aria-live="off">—:—</span>
+    <div class="liveStopwatch liveTaskHeading">
+      <h2 id="liveTaskTitle" data-clarity-mask="true" hidden></h2>
+      <div class="liveTaskMeta"><span id="liveTaskState" role="status" aria-live="polite" hidden></span><span id="runTimer" role="timer" aria-label="Current run time remaining" aria-describedby="runTimerDetail" aria-live="off">—:—</span></div>
       <span id="runTimerDetail" hidden>Waiting for a run</span>
     </div>
   </section>
@@ -82,6 +90,14 @@
   </div>
   </div>
   <div class="cameraFooter">
+  <section id="liveAssessment" class="runnerAssessment" aria-labelledby="liveAssessmentTitle" hidden>
+    <h3 id="liveAssessmentTitle">Your assessment</h3>
+    <div id="liveAssessmentControls" class="assessmentControls" role="group" aria-label="Your assessment">
+      <button type="button" data-label="" aria-pressed="true">Not completed</button><button type="button" data-label="Failure" aria-pressed="false">Failed</button><button type="button" data-label="Success" aria-pressed="false">Succeeded</button>
+    </div>
+    <p id="liveAssessmentStatus" class="help" role="status">Your label is provisional until the run ends.</p>
+    <p id="assessmentWindow" class="help" role="status" hidden>Video review opens in five seconds. You can edit your assessment later.</p>
+  </section>
   <div class="cameraDetails">
   <div class="cameraStatusLine"><p id="station" role="status" aria-live="polite">Checking / unavailable</p><span id="status" hidden class="tag">Connecting</span><p id="publicRunError" class="publicRunError" role="status" aria-live="polite" hidden></p></div>
     <aside id="yourQueue" class="panel robotQueue" tabindex="-1">      <span id="queueSummary" role="status">Queue · connecting…</span><ol id="queue" hidden><li>Waiting for queue information</li></ol>
@@ -106,7 +122,7 @@
   </div>
   </div>
   <div class="watchInteraction">
-  <div class="taskChatHeading"><h2><span id="chatPaneTitle">Task chat</span><span id="taskHeaderPrompt"></span></h2></div>
+  <div class="taskChatHeading"><h2><span id="chatPaneTitle">Activity</span></h2></div>
 <aside id="visitorChatPanel" class="panel visitorChat" aria-label="Visitor chat" tabindex="-1" hidden>
   <div class="visitorChatHeading"><h2>Visitor chat</h2><button id="closeVisitorChat" type="button" aria-label="Close visitors chat" aria-controls="visitorChatPanel" aria-expanded="true">Close</button></div>
   <p class="help">Chat with other people watching. Messages are public.</p>
@@ -120,9 +136,8 @@
   <p class="help">Recent messages clear when the server restarts.</p>
 </aside>
   <section id="liveConversationPanel" data-mode="reasoning" class="panel liveConversation" aria-label="Current run conversation">
-    <div class="statusHeader"><h2 id="conversationModeTitle">Astra decision notes</h2></div>
+    <div class="statusHeader"><h2 id="conversationModeTitle">Astra notes</h2></div>
     <p id="sideRunner" class="help">Runner: —</p>
-    <p id="policyRouteNotice" class="help" role="status" hidden></p>
     <details class="runPrompt" open><summary>Prompt</summary><p id="sidePrompt">Waiting for someone to run a policy.</p></details>
     <div class="statusHeader"><h2 id="sideConversationTitle">Response notes</h2><span id="sideConversationState" class="tag">Waiting for a run</span></div>
     <ol id="sideConversationMessages" tabindex="0" aria-label="Live conversation messages" aria-live="polite" aria-relevant="additions"><li>Astra’s replies and robot feedback from the current run appear here for everyone.</li></ol>
@@ -132,7 +147,7 @@
     <section class="panel">
       <form id="runForm" autocomplete="off">
         <div class="promptRow"><label class="taskPromptLabel" for="prompt">Your task</label><textarea id="prompt" aria-label="Task prompt" aria-describedby="steeringHelp steeringFeedback steeringDelivery" placeholder="What should the robot do?" rows="1" maxlength="4000" required></textarea>
-          <div class="composerToolbar"><button id="composerSettings" type="button" aria-label="Run settings" title="Run settings" aria-haspopup="dialog" aria-controls="localRunDialog">+</button><select id="composerModel" aria-label="Choose model" disabled><option>Connecting…</option></select><button id="composerStop" type="button" hidden disabled>Stop</button><button id="composerSend" type="button" class="primary" aria-label="Send task" title="Send task" disabled><span aria-hidden="true">↑</span></button></div>
+          <div class="composerToolbar"><button id="composerSettings" type="button" aria-label="Run settings" title="Run settings" aria-haspopup="dialog" aria-controls="localRunDialog">+</button><select id="composerModel" aria-label="Choose model" disabled><option>Connecting…</option></select><button id="composerStop" type="button" hidden disabled>Stop</button><button id="composerSend" type="button" class="primary" aria-label="Send task" title="Send task" disabled><span aria-hidden="true"><svg class="composerSendArrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V4m-6 6 6-6 6 6"/></svg><svg class="composerSendStop" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></span></button></div>
           <div class="runLaunchActions"><button id="openLocalRun" class="primary" type="button" hidden disabled>Select model and run</button><button id="openSubscriptionInstructions" type="button" aria-haspopup="dialog" aria-controls="codexInstructions">Run via own LLM subscription</button></div><div id="runButtons"><button class="primary" id="run" type="submit" disabled>Run online</button><button type="button" id="openCodexInstructions">Run Locally through Subscription</button><button type="button" id="runAstra" hidden disabled>Run with Astra</button><button type="button" id="runClaude" hidden disabled>Run with Opus</button><button type="button" id="runGroot" hidden disabled>Run GR00T</button></div></div>
         <div class="mainChatSteering">
           <p id="steeringHelp" class="help" hidden>You can intervene here and update the prompt on the go. Updates guide the next decision. Motion already sent may finish; use Stop to halt.</p>
@@ -141,18 +156,13 @@
         </div>
         <details id="runSettings"><summary>Settings</summary>
         <label for="provider">Provider or policy</label>
-        <select id="provider"><option value="openai" selected>ChatGPT</option><option value="anthropic">Claude</option><option value="local_raise_lower">No AI — just wiggle arms</option><option value="astra" hidden disabled>Astra · bring your key</option></select>
+        <select id="provider"><option value="openai" selected>ChatGPT</option><option value="anthropic">Claude</option><option value="local_raise_lower">No AI — just wiggle arms</option><option value="astra" hidden disabled>Astra · bring your key</option><option value="custom_endpoint" hidden disabled>Custom end-point</option></select>
         <div id="modelSettings">
           <label for="model">Model</label>
           <input id="model" value="gpt-6-astra" list="availableModels" maxlength="128" spellcheck="false" autocapitalize="none" aria-describedby="modelCatalogStatus">
           <datalist id="availableModels"></datalist>
           <button id="refreshModels" type="button">Refresh models</button>
           <p id="modelCatalogStatus" class="help" role="status">Choose Astra or GPT 6.1+, or Claude Opus 5.5+. You can enter a new model ID directly.</p>
-        </div>
-        <div id="aspireRetrySettings" hidden>
-          <label for="automaticRetryLimit">Automatic recovery retry limit</label>
-          <input id="automaticRetryLimit" type="number" min="0" max="3" step="1" value="1" aria-describedby="automaticRetryHelp">
-          <p id="automaticRetryHelp" class="help">0 disables automatic retries; 1–3 bounds live recovery attempts. Saved in this browser for the next submission. Current runs keep their recorded limit. Changing this setting does not rerun old tasks.</p>
         </div>
         <div id="effortField" hidden>
           <label for="reasoningEffort">Thinking effort</label>
@@ -201,6 +211,14 @@
           <input id="apiKey" type="password" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="4096" placeholder="Paste a dedicated API key here" aria-describedby="apiKeyLinks">
           <p class="help" id="apiKeyLinks">Generate new key <a id="apiKeyCreate" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">here</a><br>Make sure you have <span id="apiKeyCreditProvider">OpenAI</span> credits <a id="apiKeyBilling" href="https://platform.openai.com/account/billing/overview" target="_blank" rel="noopener noreferrer">here</a></p>
         </div>
+        <div id="customEndpointSetup" hidden>
+          <label for="customEndpoint">End-point URL</label>
+          <input id="customEndpoint" type="url" pattern="https://.+" maxlength="2048" placeholder="https://policy.example.com" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="customEndpointHelp" disabled>
+          <p id="customEndpointHelp" class="help"><a href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md#custom-end-point" target="_blank" rel="noopener noreferrer">Endpoint format and examples</a></p>
+          <label for="customEndpointKey">Bearer key (optional)</label>
+          <input id="customEndpointKey" type="password" maxlength="4096" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="customEndpointKeyHelp" disabled>
+          <p id="customEndpointKeyHelp" class="help">Sent only to your endpoint. Leave blank if your server does not require authentication.</p>
+        </div>
         <div id="codexSetup" hidden><p id="codexStatus" class="help" role="status"></p><button type="button" id="codexCheck">Check Codex connection</button><p class="help">First-time sign-in: <code>./run.sh --codex-login --provider codex</code></p></div>
         <div id="claudeSetup" hidden><p id="claudeStatus" class="help" role="status"></p><button type="button" id="claudeCheck">Check Claude connection</button><p class="help">First-time sign-in: <code>./run.sh --claude-login --provider claude</code></p></div>
 
@@ -220,7 +238,7 @@
         </details>
         <dialog id="localRunDialog" aria-labelledby="localRunTitle">
           <div class="localRunHeader"><h3 id="localRunTitle">Select model and run</h3><button id="closeLocalRun" type="button" aria-label="Close run setup">Close</button></div>
-          <div id="localRunDialogBody"><div class="runTimeControl runDurationControl"><label for="runDuration">Time</label><input id="runDuration" form="runForm" type="number" min="1" max="10" step="1" value="5" aria-describedby="runDurationUnit" required><span id="runDurationUnit">min</span></div><p id="aspireSetupGuidance" class="help" hidden>To develop and run your own ASPIRE programs locally with Codex, follow the <a href="https://github.com/andlyu/blupe-remote-yam/blob/main/codex-runner/docs/aspire/README.md" target="_blank" rel="noopener noreferrer">ASPIRE quick-start README</a>.</p></div>
+          <div id="localRunDialogBody"><div class="runTimeControl runDurationControl"><label for="runDuration">Time</label><input id="runDuration" form="runForm" type="number" min="1" max="10" step="1" value="5" aria-describedby="runDurationUnit" required><span id="runDurationUnit">min</span></div></div>
           <p id="localRunMessage" role="status" aria-live="polite"></p>
         </dialog>
       </form>
@@ -240,7 +258,6 @@
   </div>
   </div>
   <div class="watchBelow">
-    <div id="aspireTaskDetails" class="aspireTaskPanel aspireTaskDetails" hidden><div id="aspireTaskEvidence"></div></div>
 
   </div>
   </div>
@@ -279,41 +296,152 @@
         <p id="myRunsStatus" class="help" role="status">Your runs will appear here.</p>
         <ol id="myRunsList" class="personalRunList"></ol>
         <button id="moreMyRuns" type="button" hidden>More of your runs</button>
-        <h2>All runs</h2>
-        <div class="runHistorySearch">
-          <label for="pastRunsModel">Model</label>
-          <select id="pastRunsModel"><option value="">All models</option></select>
+        <div class="statusHeader allRunsHeading">
+          <h2>All runs</h2>
+          <button id="openRunDataChat" type="button" aria-controls="runDataChat" aria-expanded="true">Ask about these runs</button>
+          <div class="runLibraryFilters">
+            <label class="runLabelSource" for="pastRunsRobot">Robots <select id="pastRunsRobot"><option value="">All robots</option></select></label>
+            <details id="pastRunsModelFilter" class="runModelFilter">
+              <summary id="pastRunsModelSummary"><span>Models</span><span id="pastRunsModelValue" class="runModelValue">All models</span><i aria-hidden="true"></i></summary>
+              <div class="runModelPanel">
+                <div class="runModelPanelHead"><strong>Filter by model</strong><button id="pastRunsModelReset" type="button" disabled>Show all</button></div>
+                <label class="visuallyHidden" for="pastRunsModelSearch">Search models</label>
+                <input id="pastRunsModelSearch" class="runModelSearch" type="search" placeholder="Search models…" autocomplete="off">
+                <div id="pastRunsModel" class="runModelOptions" role="group" aria-label="Models"></div>
+                <p id="pastRunsModelEmpty" class="help" role="status">Loading models…</p>
+              </div>
+            </details>
+            <label class="runLabelSource" for="pastRunsLabelSource">Labels <select id="pastRunsLabelSource"><option value="auto">Auto-labeled</option><option value="human">Human-labeled</option></select></label>
+            <div class="runViewSwitch" role="group" aria-label="All runs view"><button id="pastRunsTableView" type="button" aria-pressed="true">Table</button><button id="pastRunsCloudView" type="button" aria-pressed="false">Cloud</button></div>
+          </div>
         </div>
+        <div id="pastRunsScores" class="runScores" aria-label="Per-model success rates" aria-live="polite"></div>
+        <p id="pastRunsScoreCaveat" class="help scoreCaveat">Observed rates on the selected user-labeled tasks. Different task mixes are not a controlled benchmark. Unlabeled and excluded runs stay visible.</p>
+        <p id="pastRunsLabelSummary" class="help" role="status"></p>
+        <div id="runDiscussionLayout" class="runDiscussionLayout" data-chat-open="true"><div class="runDiscussionData">
+        <p id="pastRunsStatus" class="help" role="status">Loading past runs…</p>
+        <div id="pastRunsCloud" hidden>
+          <p class="help">Nearby points have similar task descriptions; this does not establish identical starting conditions or physical difficulty. Small offsets separate repeated attempts.</p>
+          <div class="cloudToolbar cloudControlBar cloudSelectionBar">
+            <div class="cloudSelectionControls" role="group" aria-label="Cloud selection">
+              <span class="cloudDrawActions"><button id="taskCloudSelectArea" type="button" class="cloudAreaToggle" aria-pressed="false" aria-describedby="taskCloudAreaHelp" disabled>Draw box</button><button id="resetTaskCloud" type="button" aria-label="Reset view">Reset view</button></span>
+              <button id="taskCloudClearArea" type="button" aria-label="Clear selection" title="Clear selection" disabled>Clear</button>
+              <span class="cloudBoxActions" role="group" aria-label="Selected box actions"><button id="taskCloudViewAreaRuns" type="button" disabled>View runs in the box</button><button id="taskCloudHideArea" type="button" disabled>Hide box</button></span>
+            </div>
+          </div>
+          <p id="taskCloudRegionStatus" class="help" role="status"></p>
+          <p id="taskCloudLegend" class="visuallyHidden">Green: Success. Red: Failure. Amber: Uncertain. Hollow: No agreed result.</p>
+          <p id="taskCloudAreaHelp" class="visuallyHidden">Choose Draw box, then drag to select a 3D region. Drag empty space to orbit; scroll or pinch to zoom.</p>
+          <div class="taskCloudStage">
+            <canvas id="taskCloudCanvas" class="taskCloudCanvas" width="1000" height="540" tabindex="0" aria-label="3D task cloud" aria-describedby="taskCloudHelp taskCloudLegend taskCloudFocus taskCloudRegionStatus taskCloudAreaHelp taskCloudAreaCounts taskCloudAreaRate taskCloudAreaPrompt"></canvas>
+            <details id="taskCloudDisplay" class="taskCloudDisplay" open>
+              <summary>Display</summary>
+              <div class="cloudLayers" role="group" aria-label="Cloud display">
+                <label><input id="taskCloudShowAutoLabels" type="checkbox" checked>Autolabels</label>
+                <label><input id="taskCloudShowLabels" type="checkbox" checked>Area labels</label>
+                <span class="cloudLayersHeading">Highlight</span>
+                <label><input id="taskCloudSuccessAreas" type="checkbox" checked>Success</label>
+                <label><input id="taskCloudFailureAreas" type="checkbox" checked>Failure</label>
+              </div>
+            </details>
+            <div id="taskCloudAreaCaptions" class="cloudAreaCaptions" aria-label="Area median runs"></div>
+            <div id="taskCloudPreview" class="taskCloudPreview" hidden aria-hidden="true">
+              <div class="taskCloudPreviewMedia"></div><p class="taskCloudPreviewTitle"></p><p class="taskCloudPreviewState"></p><button class="taskCloudPreviewOpen" type="button" hidden>Open run</button>
+            </div>
+          </div>
         <form id="pastRunsSearch" class="runHistorySearch" role="search" aria-label="Past attempts">
-          <label for="pastRunsQuery">Search videos by task</label>
+          <label for="pastRunsQuery">Search point cloud by task</label>
           <div><input id="pastRunsQuery" type="search" maxlength="300" placeholder="apple, stack blocks, put pens in a cup" aria-describedby="pastRunsSearchHelp"><button type="submit">Search</button><button id="clearPastRunsSearch" type="button" hidden>Clear search</button></div>
           <p id="pastRunsSearchHelp" class="help">Find recordings by their task prompt, such as apple or put pens into a cup. Related objects and partial tasks may match. Watch a replay to see what happened.</p>
         </form>
-        <p class="help">Hover for a quick preview. Select a recording to watch the full run.</p>
-        <p id="pastRunsStatus" class="help" role="status">Loading past runs…</p>
-        <ol id="pastRunsList"></ol>
+          <section id="taskCloudAreaSummary" class="cloudAreaSummary" aria-labelledby="taskCloudAreaTitle" data-clarity-mask="true" hidden>
+            <h3 id="taskCloudAreaTitle">3D selection</h3>
+            <p id="taskCloudAreaCounts" role="status" aria-live="polite"></p>
+            <p id="taskCloudAreaRate" class="help"></p>
+            <p class="cloudAreaMedian"><strong>Median prompt:</strong> <span id="taskCloudAreaPrompt"></span></p>
+            <div id="taskCloudTransformToolbar" class="cloudTransformToolbar" hidden>
+              <div class="cloudTransformModes" role="group" aria-label="3D box tool"><button id="taskCloudToolMove" type="button" aria-pressed="false" aria-keyshortcuts="W">Move box</button><button id="taskCloudToolResize" type="button" aria-pressed="true" aria-keyshortcuts="R">Resize box</button><button id="taskCloudToolRotate" type="button" aria-pressed="false" aria-keyshortcuts="E">Rotate box</button></div>
+              <p id="taskCloudToolHelp" class="help">Drag a colored cube to push or pull one box face. Box axes: X red, Y green, Z blue.</p>
+            </div>
+            <div class="cloudAxisSteps" role="group" aria-label="Keyboard-accessible 3D box adjustments"><span id="taskCloudNudgeHelp">Resize by 10%</span><button id="taskCloudNudgeXMinus" type="button" aria-label="Adjust box X minus">X−</button><button id="taskCloudNudgeXPlus" type="button" aria-label="Adjust box X plus">X+</button><button id="taskCloudNudgeYMinus" type="button" aria-label="Adjust box Y minus">Y−</button><button id="taskCloudNudgeYPlus" type="button" aria-label="Adjust box Y plus">Y+</button><button id="taskCloudNudgeZMinus" type="button" aria-label="Adjust box Z minus">Z−</button><button id="taskCloudNudgeZPlus" type="button" aria-label="Adjust box Z plus">Z+</button></div>
+            <div id="taskCloudVolumeControls" class="cloudVolumeControls" role="group" aria-label="Adjust 3D selection box">
+              <label>Width <output id="taskCloudVolumeWidthValue">100%</output><input id="taskCloudVolumeWidth" type="range" min="5" max="300" value="100" aria-label="Selection box width"></label>
+              <label>Height <output id="taskCloudVolumeHeightValue">100%</output><input id="taskCloudVolumeHeight" type="range" min="5" max="300" value="100" aria-label="Selection box height"></label>
+              <label>Depth <output id="taskCloudVolumeDepthValue">100%</output><input id="taskCloudVolumeDepth" type="range" min="5" max="300" value="100" aria-label="Selection box depth"></label>
+              <label>Depth position <output id="taskCloudVolumePositionValue">50%</output><input id="taskCloudVolumePosition" type="range" min="0" max="100" value="50" aria-label="Selection box depth position"></label>
+            </div>
+            <div class="cloudToolbar"><span class="help">Size is relative to the original box. Depth position moves along its Z axis. W: move, R: resize, E: rotate when the cloud is focused. Draw box replaces the box from an outline. The camera stays where you leave it.</span></div>
+          </section>
+          <p id="taskCloudHelp" class="help">On touch screens, drag a point into the pointer or tap a point to preview; tap Open run for full replay. With a mouse, hover to preview and click to open. Drag to rotate; pinch or scroll to zoom. Arrow keys rotate, +/− zoom, Home resets. Use [ and ] to focus each run; Escape closes the preview. Hollow runs stay visible and do not count toward scores. Table provides an accessible alternative.</p>
+          <p id="taskCloudFocus" role="status" aria-live="polite">Select a point to inspect a run.</p><p id="taskCloudVersion" class="help"></p>
+        </div>
+        <div id="pastRunsTable" role="region" aria-label="All runs recording blocks">
+          <p class="help">Hover for a quick preview. Select a recording to watch the full run.</p>
+          <ol id="pastRunsList"></ol>
+        </div>
         <button id="morePastRuns" type="button" hidden>Load more</button>
+        </div>
+        <aside id="runDataChat" class="runDataChat" aria-labelledby="runDataChatTitle" data-clarity-mask="true">
+          <div class="runDataChatHeader"><h3 id="runDataChatTitle">Discuss the data</h3><button id="closeRunDataChat" type="button" aria-label="Close data chat">Close</button></div>
+          <label class="runDataChatScope">Discuss<select id="runDataChatScope"><option value="all">All runs, with library context</option><option value="filtered">Current filters / selected box</option><option value="run" disabled>Opened / last viewed replay</option></select></label>
+          <p id="runDataChatScopeText" class="runDataChatScopeText" aria-live="polite"></p>
+          <p id="runDataChatModel" class="runDataChatModel">Connecting data chat…</p>
+          <div class="runDataChatStarters" aria-label="Data discussion starters">
+            <button type="button" data-question="What is working and failing in this scope? Give sample sizes and examples.">What works? What fails?</button>
+            <button type="button" data-question="Which repeated tasks have mixed results? Show a success and a failure to compare.">Find mixed results</button>
+            <button type="button" data-question="What can we conclude about the models here, and what evidence is missing?">Compare models carefully</button>
+          </div>
+          <div id="runDataChatMessages" class="runDataChatMessages" role="log" aria-label="Data conversation" aria-live="polite"></div>
+          <form id="runDataChatForm" class="runDataChatForm">
+            <label for="runDataChatQuestion">Ask about the runs</label>
+            <textarea id="runDataChatQuestion" maxlength="2000" rows="3" placeholder="Which tasks have both successes and failures?" aria-describedby="runDataChatModel runDataChatStatus" required disabled></textarea>
+            <div class="runDataChatActions"><button id="runDataChatSend" type="submit" disabled>Ask</button><button id="runDataChatCancel" type="button" hidden>Stop waiting</button><button id="runDataChatNew" type="button">New conversation</button></div>
+          </form>
+          <p id="runDataChatStatus" class="runDataChatStatus" role="status" aria-live="polite"></p>
+        </aside>
+        </div>
       </section>
   <section id="playground-guide" class="panel playgroundResources" aria-labelledby="tryForYourselfTitle">
     <h2 id="tryForYourselfTitle">How to use the playground</h2>
     <ol class="playgroundSteps"><li><strong>Choose a robot and model.</strong> Open the model menu to set up your connection and run duration.</li><li><strong>Describe the task.</strong> Send your prompt to join the queue. Watch the cameras and follow the robot’s progress in task chat.</li><li><strong>Review the run.</strong> Browse recordings below, or open the dataset to explore the camera and action data.</li></ol>
-    <p class="resourceLinks"><a href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API docs ↗</a><a href="https://github.com/andlyu/blupe-remote-yam#run-the-blupe-playground-locally" target="_blank" rel="noopener noreferrer">Run locally ↗</a><a href="https://github.com/NVlabs/ASPIRE" target="_blank" rel="noopener noreferrer">ASPIRE README ↗</a></p>
+    <p class="resourceLinks"><a href="https://github.com/andlyu/blupe-remote-yam/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API docs ↗</a><a href="https://github.com/andlyu/blupe-remote-yam#run-the-blupe-playground-locally" target="_blank" rel="noopener noreferrer">Run locally ↗</a></p>
   </section>
   <footer>Keys stay out of logs. Robot controls stay with your session.<!-- application-operator -->
     <button id="resetRuns" type="button" disabled aria-describedby="resetRunsStatus" title="Refresh your 20-run allowance when your run is idle. History and settings are kept.">Reset runs</button>
     <span id="resetRunsStatus" role="status" aria-live="polite"></span>
   </footer>
 </div>
-<dialog id="pastRunDialog" aria-labelledby="pastRunTitle">
+<dialog id="pastRunDialog" class="runSidebar" aria-labelledby="pastRunTitle" aria-modal="false">
   <div class="statusHeader"><h2 id="pastRunTitle">Past run</h2><button id="closePastRun" type="button" aria-label="Close video">Close</button></div>
+  <div class="runSidebarPlayer">
   <div id="replayProcessing" class="replayProcessing" role="status" aria-live="polite" hidden><progress aria-label="Processing replay"></progress><p>Processing your replay. This usually takes about a minute.</p><p class="help">You can close this and run another while it processes.</p></div>
   <div class="recordedPlayer"><video id="pastRunVideo" controls playsinline preload="none"></video></div>
+  </div>
+  <div id="runSidebarBody" class="runSidebarBody">
   <p id="pastRunError" role="status"></p>
   <p id="pastRunPrompt"></p><p id="pastRunDetails" class="help"></p>
+  <section id="similarRuns" aria-labelledby="similarRunsTitle">
+    <h3 id="similarRunsTitle">Similar videos</h3>
+    <p id="similarRunsStatus" class="help" role="status">Select a run to find similar videos.</p>
+    <p id="similarRunsScore" class="similarRunsScore" role="status"></p>
+    <ol id="similarRunsList" class="similarRunsList"></ol>
+    <button id="moreSimilarRuns" type="button" hidden>Show more similar videos</button>
+    <div id="similarRunsSentinel" aria-hidden="true"></div>
+  </section>
+  <details id="runSidebarDetails" class="runSidebarDetails"><summary>Run details and human assessment</summary>
+  <section id="replayAssessment" class="runnerAssessment" aria-labelledby="replayAssessmentTitle">
+    <h3 id="replayAssessmentTitle">Runner assessment</h3><p id="replayAssessmentSummary" role="status"></p>
+    <div id="replayAssessmentControls" class="assessmentControls" role="group" aria-label="Edit your assessment" hidden><button type="button" data-label="" aria-pressed="true">Not completed</button><button type="button" data-label="Failure" aria-pressed="false">Failed</button><button type="button" data-label="Success" aria-pressed="false">Succeeded</button></div>
+    <div id="replayVoteControls" class="assessmentControls" role="group" aria-label="Review the runner assessment" hidden><button type="button" data-vote="1" aria-pressed="false">Assessment correct</button><button type="button" data-vote="-1" aria-pressed="false">Assessment incorrect</button><button type="button" data-vote="">Remove my vote</button></div>
+    <p id="replayAssessmentStatus" class="help" role="status"></p>
+    <details><summary>Assessment revision history</summary><ol id="assessmentHistory"></ol></details>
+  </section>
   <div class="replayEmailActions"><button id="replayEmailButton" type="button" hidden>Email me the video</button><span id="replayEmailHint" class="help" hidden></span></div>
   <p id="replayEmailStatus" class="help" role="status" aria-live="polite"></p>
   <h3>Run totals</h3><p id="pastRunMetricsSummary" class="help"></p>
   <div id="pastRunMetricsChart"></div>
+  </details>
+  </div>
 </dialog>
 
 <dialog id="replayEmailDialog" aria-labelledby="replayEmailTitle">

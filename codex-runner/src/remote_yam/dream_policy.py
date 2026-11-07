@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 
+from .cadence import trajectory_cadence
 from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
 from .latency_spans import journal_span
 
@@ -30,13 +31,15 @@ class DreamWorkerUnavailable(RuntimeError):
 
 class DreamObservationError(ValueError):
     """Only locally authored diagnostics may be exposed in the run log."""
-    def __init__(self, message, *, field, retryable=False):
+    def __init__(self, message, *, field, retryable=False, http_status=None, cause=None):
         super().__init__(message)
         self.field, self.retryable = field, retryable
+        self.http_status, self.cause = http_status, cause
 
 
-def motion_limited_waypoints(points, observation, max_step_deg, *, max_commands=MAX_COMMANDS):
-    """Retain every paired target; add 100 ms steps instead of clipping the path."""
+def motion_limited_waypoints(points, observation, max_step_deg, *, max_commands=MAX_COMMANDS, cadence_hz=10):
+    """Retain endpoints and cap joint/gripper speed in wall time at each cadence."""
+    cadence_hz = trajectory_cadence(cadence_hz)
     state_input(observation, '')
     previous = [*observation['left_joints_deg'], observation['left_gripper'],
                 *observation['right_joints_deg'], observation['right_gripper']]
@@ -50,7 +53,8 @@ def motion_limited_waypoints(points, observation, max_step_deg, *, max_commands=
             raise ValueError('Dream targets must convert to finite gateway angles')
         joint_delta = max(abs(target[i]-previous[i]) for i in (*range(6), *range(7, 13)))
         grip_delta = max(abs(target[i]-previous[i]) for i in (6, 13))
-        steps = max(1, math.ceil(joint_delta / max_step_deg), math.ceil(grip_delta / .3))
+        steps = max(1, math.ceil(joint_delta * cadence_hz / (max_step_deg * 10)),
+                    math.ceil(grip_delta * cadence_hz / 3))
         if len(result) + steps > capacity:
             raise ValueError('Motion-limited Dream path exceeds the session waypoint budget')
         for step in range(1, steps + 1):
@@ -70,25 +74,27 @@ def state_input(observation, prompt):
         if joints is None:
             raise DreamObservationError('Measured ' + field + ' is unavailable', field=field, retryable=True)
         if (not isinstance(joints, (list, tuple)) or len(joints) != 6
-                or any(type(x) not in (float, int) or not math.isfinite(x) for x in joints)):
+                or any(isinstance(x, bool) or not isinstance(x, (float, int)) or not math.isfinite(x) for x in joints)):
             raise DreamObservationError('Measured ' + field + ' must contain six finite numbers', field=field)
         field = side + '_gripper'
         if grip is None:
             raise DreamObservationError('Measured ' + field + ' is unavailable', field=field, retryable=True)
-        if type(grip) not in (float, int) or not math.isfinite(grip) or not 0 <= grip <= 1:
+        if isinstance(grip, bool) or not isinstance(grip, (float, int)) or not math.isfinite(grip) or not 0 <= grip <= 1:
             raise DreamObservationError('Measured ' + field + ' must be finite and within 0..1', field=field)
         result['state.' + side + '_arm'] = [math.radians(x) for x in joints]
-        result['state.' + side + '_gripper'] = [grip]
+        result['state.' + side + '_gripper'] = [float(grip)]
     return result
 
 
-def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS):
-    """20 Hz endpoint sampling at 10 Hz preserves the predicted duration."""
+def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS, cadence_hz=10):
+    """10/20 Hz retain slowed playback; 30 Hz uses native model timing."""
+    cadence_hz = trajectory_cadence(cadence_hz)
+    stride = 2 if cadence_hz == 10 else 1
     chunks = [action.get(key) for key in ('q_l_chunk', 'q_r_chunk')]
-    if (any(not isinstance(rows, list) or not rows or len(rows) % 2 for rows in chunks)
+    if (any(not isinstance(rows, list) or not rows or len(rows) % stride for rows in chunks)
             or len(chunks[0]) != len(chunks[1])):
         raise ValueError('Dream returned mismatched or incomplete joint chunks')
-    count = len(chunks[0]) // 2
+    count = len(chunks[0]) // stride
     if (type(first_step_id) is not int or first_step_id < 0 or count > MAX_WAYPOINTS_PER_PACKET
             or first_step_id + count > max_commands):
         raise ValueError('Dream chunk exceeds the session waypoint budget')
@@ -104,7 +110,7 @@ def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS):
                  # can overshoot their normalized endpoints; physical commands cannot.
                  left_gripper=min(1., max(0., chunks[0][i][6])),
                  right_gripper=min(1., max(0., chunks[1][i][6])))
-            for n, i in enumerate(range(1, len(chunks[0]), 2))]
+            for n, i in enumerate(range(stride - 1, len(chunks[0]), stride))]
 
 
 class DreamWorker:
@@ -179,7 +185,7 @@ class DreamAdapter:
 
     def __init__(self, *, provider, model, credentials, python, directory,
                  camera_source, observation_source, robot_id, worker_factory=DreamWorker,
-                 gateway_max_step_deg=None, worker_pool=None, run_context=None, evidence_observer=None):
+                 gateway_max_step_deg=None, worker_pool=None, calibration_source=None, run_context=None, evidence_observer=None):
         if provider not in MODELS or model != MODELS[provider][0]:
             raise ValueError('Unknown Dream checkpoint')
         self.provider_name, self.model = provider, model
@@ -190,6 +196,8 @@ class DreamAdapter:
         self.worker_pool = worker_pool
         self.run_context = run_context
         self.evidence_observer = evidence_observer
+        self.calibration_source = calibration_source
+        self._kinematics = None
         self._worker_slot = False
         self._transport_lock = threading.RLock()
         self.gateway_max_step_deg = gateway_max_step_deg
@@ -224,17 +232,62 @@ class DreamAdapter:
         if self.interaction_sink:
             self.interaction_sink(kind, message, **details)
 
+    trajectory_cadence_hz = 10.0
+
+    def configure_cadence(self, cadence_hz):
+        if self._preparation is not None:
+            raise ValueError('Set cadence before preparing the Dream worker')
+        self.trajectory_cadence_hz = trajectory_cadence(cadence_hz)
+        self._max_commands = command_budget(self.provider_name, getattr(self, "_run_duration_s", 300), self.trajectory_cadence_hz)
+
     def configure_run_duration(self, seconds):
-        self._max_commands = command_budget(self.provider_name, seconds)
+        self._run_duration_s = seconds
+        self._max_commands = command_budget(self.provider_name, seconds, self.trajectory_cadence_hz)
+
+    def configure_robot_workspace(self, robot_id, *, report=None):
+        from .dream_calibration import ROBOHOUSE, binding_from_report, kinematic_description
+        if robot_id != self.robot_id:
+            raise ValueError('Dream calibration robot differs from the selected station')
+        # Preserve other stations' existing native encoder conventions.
+        if report is None and self.calibration_source is None and robot_id != ROBOHOUSE:
+            return
+        if report is None:
+            if self.calibration_source is not None:
+                report = self.calibration_source()
+            else:
+                from .api_depth import ApiDepth
+                origin = getattr(self.camera_source, 'allowed_origin', None)
+                if not origin:
+                    raise ValueError('Dream needs the live selected station calibration before starting')
+                scheme, host, port = origin
+                authority = f'[{host}]' if ':' in host else host
+                api = ApiDepth(f'{scheme}://{authority}:{port}', robot_id)
+                try:
+                    report = json.loads(api.read('/calibration', 256_000))
+                finally:
+                    api.connection.close()
+        binding = binding_from_report(report, robot_id)
+        if self._kinematics is not None:
+            if binding['fingerprint'] != self._kinematics['binding']['fingerprint']:
+                raise ValueError('Selected calibration changed during this Dream run; stop and start a new run')
+            return
+        if self._preparation is not None:
+            raise ValueError('Bind Dream calibration before preparing its solver')
+        self._kinematics = kinematic_description(binding)
 
     def public_config(self):
-        return dict(provider=self.provider_name, model=self.model, cadence_hz=10,
-                    model_action_hz=20, observation_fps=5, observation_window=9,
+        return dict(provider=self.provider_name, model=self.model, cadence_hz=self.trajectory_cadence_hz,
+                    model_action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
+                    native_action_hz=30, observation_fps=5, observation_window=9,
                     api_key_configured=True, sdk_background_recording=False,
                     execution_mode='sequential_chunks', action_space='eef', ik_solve='traj',
                     max_joint_step_deg=self.max_joint_step_deg,
                     effective_joint_step_deg=self.effective_joint_step_deg,
-                    gateway_profile_step_deg=self.gateway_max_step_deg)
+                    gateway_profile_step_deg=self.gateway_max_step_deg,
+                    **({'kinematic_calibration': json.loads(json.dumps(self._kinematics['binding'])),
+                        'model_calibration_id':self._kinematics['binding']['model_calibration_id'],
+                        'calibration_id':self._kinematics['binding']['camera_calibration_id']}
+                       if self._kinematics is not None else {}))
 
     def _cancelled(self):
         return self._stop.is_set() or self.cancelled()
@@ -249,10 +302,14 @@ class DreamAdapter:
 
     def prepare_after_lease(self, cancelled):
         self.cancelled = cancelled
+        if self._kinematics is not None:
+            # A queued runner must not use the profile selected before a dashboard
+            # change. Reject before prediction; never rebuild/replay a motion.
+            self.configure_robot_workspace(self.robot_id)
         self._start_preparation()
 
     def _worker_timings(self, reply):
-        allowed = {'sdk_import', 'sdk_client_init', 'sdk_configure',
+        allowed = {'sdk_import', 'sdk_client_init', 'sdk_configure', 'sdk_kinematics_install',
                    'sdk_observation_update', 'sdk_get_action', 'sdk_reset'}
         for row in reply.get('stage_timings') or []:
             if not isinstance(row, dict) or row.get('stage') not in allowed:
@@ -295,10 +352,16 @@ class DreamAdapter:
                         worker = self.worker_factory(self.python, self.credentials, self.directory)
                     self._worker = worker
                 with journal_span(self.interaction_sink, 'worker_configure'):
-                    reply = worker.call('configure', checkpoint=self.model, cancelled=self._cancelled, timeout=180)
+                    reply = worker.call('configure', checkpoint=self.model,
+                        action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
+                        **({'kinematics': self._kinematics} if self._kinematics is not None else {}),
+                        cancelled=self._cancelled, timeout=180)
                 self._worker_timings(reply)
                 if not reply['ok']:
                     self._failure = 'Dream SDK setup failed (' + reply.get('error_type', 'unknown') + ')'
+                    return
+                if self._kinematics is not None and (reply.get('result') or {}).get('kinematic_calibration') != self._kinematics['binding']:
+                    self._failure = 'Dream worker did not confirm the selected calibration; no prediction will run'
                     return
                 self._ready.set()
             except Exception as error:
@@ -387,7 +450,13 @@ class DreamAdapter:
             detail = last_failure.get('cause')
             message = 'Dream ' + (role + ' ' if role in CAMERAS else '') + 'camera capture failed'
             message += ' (' + (str(detail) if detail else type(error).__name__) + ')'
-            raise DreamObservationError(message, field='camera_' + role if role in CAMERAS else 'camera_capture') from None
+            # The camera batch may exhaust its attempts during a short outage.
+            # Keep transient/permanent classification for the collector's bounded
+            # recovery window; never retry denied access or use old images.
+            raise DreamObservationError(message,
+                field='camera_' + role if role in CAMERAS else 'camera_capture',
+                retryable=last_failure.get('retryable') is True,
+                http_status=last_failure.get('http_status'), cause=detail) from None
         camera_capture_s = time.monotonic()-camera_began
         if len(frames) != 3 or {frame.name for frame in frames} != set(CAMERAS):
             raise DreamObservationError('Dream requires overhead and both wrist cameras', field='camera_roles')
@@ -462,21 +531,28 @@ class DreamAdapter:
                 with self._changed:
                     # Never use a prior sample while current feedback is unavailable.
                     self._history.clear()
+                if self.interaction_sink and (first_failure or not retrying):
+                    self.interaction_sink('observation_retry' if retrying else 'observation_failure',
+                        'Dream observation unavailable: ' + str(error),
+                        field=error.field, retrying=retrying, recovery_window_s=OBSERVATION_RECOVERY_S,
+                        http_status=error.http_status, cause=error.cause)
+                with self._changed:
+                    # Retain the diagnosis before waking a consumer that may
+                    # immediately stop the lease and destroy this adapter.
                     if not retrying:
                         self._failure = 'Dream observation capture failed: ' + str(error)
                         if error.retryable:
                             self._failure += ' (recovery timed out)'
                     self._changed.notify_all()
-                if self.interaction_sink and (first_failure or not retrying):
-                    self.interaction_sink('observation_retry' if retrying else 'observation_failure',
-                        'Dream observation unavailable: ' + str(error),
-                        field=error.field, retrying=retrying, recovery_window_s=OBSERVATION_RECOVERY_S)
                 if not retrying:
                     return
             except Exception as error:
                 if not self._cancelled():
                     with self._changed:
                         self._history.clear()
+                    self._interaction('observation_failure', 'Dream observation capture failed',
+                                      field='observation', cause=type(error).__name__)
+                    with self._changed:
                         self._failure = 'Dream observation capture failed (' + type(error).__name__ + ')'
                         self._changed.notify_all()
                 return
@@ -510,6 +586,14 @@ class DreamAdapter:
             recover(checkpoint=self.model, cancelled=self._cancelled)
             if self._cancelled():
                 raise RuntimeError('Dream worker recovery cancelled')
+            if self._kinematics is not None:
+                self.configure_robot_workspace(self.robot_id)
+                reply = self._worker.call('configure', checkpoint=self.model,
+                    action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
+                    kinematics=self._kinematics, cancelled=self._cancelled, timeout=180)
+                self._worker_timings(reply)
+                if not reply.get('ok') or (reply.get('result') or {}).get('kinematic_calibration') != self._kinematics['binding']:
+                    raise DreamWorkerUnavailable('Recovered Dream worker did not confirm the selected calibration')
             # Revalidate the SAME lease, completed step and idle executor before
             # requesting another prediction. No failed request/action is replayed.
             if callable(self.refresh_observation):
@@ -559,7 +643,7 @@ class DreamAdapter:
             except BaseException:
                 pass
         context.update(call_id=uuid.uuid4().hex, first_step_id=first_step_id,
-                       robot_id=self.robot_id, model=self.model, cadence_hz=10)
+                       robot_id=self.robot_id, model=self.model, cadence_hz=self.trajectory_cadence_hz)
         stamp = observation.get('observed_at')
         if type(stamp) in (int, float) and math.isfinite(stamp):
             context['observed_at'] = stamp
@@ -570,6 +654,9 @@ class DreamAdapter:
     def build_trajectory(self, prompt, observation, first_step_id):
         if self._cancelled():
             raise RuntimeError('Dream cancelled')
+        if self._kinematics is not None:
+            with journal_span(self.interaction_sink, 'calibration_check', first_step_id=first_step_id):
+                self.configure_robot_workspace(self.robot_id)
         if self._preparation is None:
             self.start_preparation(self.cancelled)
         self.wait_ready(self._cancelled)
@@ -667,13 +754,15 @@ class DreamAdapter:
                     began = time.monotonic()
                     continue
                 result = reply['result']
-                nominal = action_waypoints(result['action'], first_step_id, max_commands=self._max_commands)
+                nominal = action_waypoints(result['action'], first_step_id, max_commands=self._max_commands,
+                                           cadence_hz=self.trajectory_cadence_hz)
                 self._observe_evidence('nominal_waypoints', nominal, prediction_context)
                 measured = latest['observation']
                 baseline = {side+'_joints_deg': [math.degrees(value) for value in measured['state.'+side+'_arm']]
                             for side in ('left', 'right')}
                 baseline.update({side+'_gripper': measured['state.'+side+'_gripper'][0] for side in ('left','right')})
-                points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands)
+                points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands,
+                                                  cadence_hz=self.trajectory_cadence_hz)
                 self._observe_evidence('motion_limited_waypoints', points, prediction_context)
                 self._pending_commanded = {
                     key: [math.radians(value) for value in points[-1][side + '_joints_deg']]

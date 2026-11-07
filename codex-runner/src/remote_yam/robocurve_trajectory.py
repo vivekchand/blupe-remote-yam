@@ -42,11 +42,13 @@ def relative_rotation(yaw, pitch, roll):
 
 class RoboCurveTrajectory:
     speed_multiplier = TRAJECTORY_SPEED
-    def __init__(self, *, base_spacing_m=None, joint_offsets_rad=None):
+    def __init__(self, *, base_spacing_m=None, joint_offsets_rad=None, preserve_uninstructed=False):
         self.ik = BimanualRelativeIK(base_spacing_m=base_spacing_m, joint_offsets_rad=joint_offsets_rad)
         self.bases = tuple(np.array([0., sign*self.ik.base_spacing_m/2, 0.]) for sign in (1, -1))
         self.low, self.high = LOW.copy(), HIGH.copy()
         self.start_rotations = None
+        self.attitude_references = dict.fromkeys(ARMS,'observed')
+        self.preserve_uninstructed = preserve_uninstructed
 
     def observe(self, observation):
         if observation.get('settled') is not True:
@@ -70,10 +72,32 @@ class RoboCurveTrajectory:
             joints.extend([*measured[i*6:i*6+6], grip])
         return q, np.asarray(state), joints
 
-    def build(self, targets, observation, first_step_id):
+    def build(self, targets, observation, first_step_id, *, attitude=None):
+        if attitude is None:return self._build(targets,observation,first_step_id)
+        if attitude!='base_vertical':
+            raise InvalidMove('attitude must be base_vertical or omitted','invalid_attitude')
+        if not isinstance(targets,dict) or not targets:
+            raise InvalidMove('targets must be a nonempty map of named dimensions')
+        arms={arm for i,arm in enumerate(ARMS) if any(n in targets for n in NAMES[i*7:i*7+6])}
+        if not arms:
+            raise InvalidMove('Vertical alignment needs a named Cartesian arm target; gripper-only moves hold joints','invalid_attitude')
+        self.observe(observation)
+        previous=self.start_rotations
+        modes=self.attitude_references
+        # Explicit per-arm reference transition. Native joint/workspace/pacing
+        # guards still validate every generated waypoint; inactive arms hold.
+        self.start_rotations=tuple(np.diag([-1.,1.,-1.]) if arm in arms else previous[i] for i,arm in enumerate(ARMS))
+        self.attitude_references={arm:'base_vertical' if arm in arms else modes[arm] for arm in ARMS}
+        try:return self._build(targets,observation,first_step_id)
+        except Exception:
+            self.start_rotations,self.attitude_references=previous,modes
+            raise
+
+    def _build(self, targets, observation, first_step_id):
         if not isinstance(targets, dict) or not targets:
             raise InvalidMove('targets must be a nonempty map of named dimensions')
         seed, start, _ = self.observe(observation)
+        held_poses=tuple((p.copy(),r.copy()) for p,r in self.ik._poses())
         measured_start = np.deg2rad(np.concatenate([observation[f'{arm}_joints_deg'] for arm in ARMS]))
         goal = start.copy()
         named = []
@@ -91,6 +115,10 @@ class RoboCurveTrajectory:
         # error on a fixed pitch/roll axis must converge gradually; clipping each
         # sample makes an instantaneous correction that subdivision cannot shrink.
         goal = np.clip(goal, self.low, self.high)
+        cartesian_arms = {i for i,arm in enumerate(ARMS)
+                          if any(n.startswith(arm+'_') and n != arm+'_gripper' for n in targets)}
+        if not self.preserve_uninstructed:
+            cartesian_arms={0,1}  # Preserve the established other-policy drift correction contract.
         ratio = max((abs(goal[i]-start[i])/STEP[i] for i in named if STEP[i] > 0), default=0)
         ratio /= 1 - 1e-6  # RoboCurve's numerical headroom
         remaining = max(0, MAX_COMMANDS-first_step_id)
@@ -117,15 +145,20 @@ class RoboCurveTrajectory:
             raise InvalidMove('Session waypoint budget exhausted', 'session_waypoint_budget')
 
         def state_at(alpha):
-            return start + alpha*(goal-start)
+            # Keep validated numeric endpoints exact, especially close=0 from
+            # measured fractional starts (subtraction can produce -1.11e-16).
+            return goal.copy() if alpha == 1.0 else start + alpha*(goal-start)
 
         def extend(a, b, previous, depth=0):
             state = state_at(b)
-            poses = tuple((state[i*7:i*7+3] + self.bases[i],
-                           relative_rotation(*state[i*7+3:i*7+6]) @ self.start_rotations[i])
-                          for i in range(2))
+            poses = tuple(((state[i*7:i*7+3] + self.bases[i],
+                            relative_rotation(*state[i*7+3:i*7+6]) @ self.start_rotations[i])
+                           if i in cartesian_arms else held_poses[i]) for i in range(2))
             try:
-                solved = self.ik._solve(previous, poses)
+                solved = self.ik._solve(previous, poses) if cartesian_arms else previous.copy()
+                for index in range(2):
+                    if index not in cartesian_arms:
+                        solved[index*6:index*6+6] = measured_start[index*6:index*6+6]
             except IKConvergenceError as exc:
                 raise InvalidMove('Cartesian target is unreachable; request a smaller move', 'unreachable_target') from exc
             previous_command = previous if points else measured_start
@@ -137,12 +170,32 @@ class RoboCurveTrajectory:
             if len(points) >= limit:
                 raise budget_error()
             degrees = np.rad2deg(solved).reshape(2, 6)
+            # An uninstructed arm retains the measured joint values verbatim,
+            # avoiding an unnecessary IK or degrees/radians round trip.
+            joint_values = [degrees[i].tolist() if i in cartesian_arms else
+                            list(observation[arm+'_joints_deg']) for i,arm in enumerate(ARMS)]
             points.append({'step_id': first_step_id+len(points),
-                           'left_joints_deg': degrees[0].tolist(),
-                           'right_joints_deg': degrees[1].tolist(),
+                           'left_joints_deg': joint_values[0],
+                           'right_joints_deg': joint_values[1],
                            'left_gripper': float(state[6]), 'right_gripper': float(state[13])})
             return solved
 
         for i in range(count):
             seed = extend(i/count, (i+1)/count, seed)
+        self.validate_joint_limits(points)
         return points
+
+    def validate_joint_limits(self, points):
+        """Final command-space check also covers measured uninstructed joints."""
+        for point in points:
+            joints=np.deg2rad(point['left_joints_deg']+point['right_joints_deg'])
+            # 1e-10rad covers degrees/radians serialization roundoff only;
+            # it is not an expanded actuator target or hardware tolerance.
+            invalid=np.flatnonzero(~np.isfinite(joints) | (joints<self.ik.low-1e-10)
+                                   | (joints>self.ik.high+1e-10))
+            if len(invalid):
+                i=int(invalid[0])
+                raise InvalidMove(
+                    f'{ARMS[i//6]} joint {i%6+1} target {point[ARMS[i//6]+"_joints_deg"][i%6]:.6f} degrees '
+                    f'is outside configured limits [{math.degrees(self.ik.low[i]):.6f}, '
+                    f'{math.degrees(self.ik.high[i]):.6f}]. No motion was sent.', 'joint_limit')

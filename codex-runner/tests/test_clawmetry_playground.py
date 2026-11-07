@@ -25,7 +25,8 @@ SECRET = 'fixture-provider-key-do-not-publish'
 
 @pytest.fixture
 def app_factory(tmp_path, monkeypatch):
-    for name in ('YAM_SOCIAL_DATABASE', 'YAM_RUN_NAMES_DATABASE', 'YAM_SUBMISSION_DATABASE'):
+    for name in ('YAM_SOCIAL_DATABASE', 'YAM_RUN_NAMES_DATABASE', 'YAM_SUBMISSION_DATABASE',
+                 'YAM_ASSESSMENT_DATABASE', 'YAM_TASK_CLOUD_DATABASE'):
         monkeypatch.setenv(name, str(tmp_path / (name + '.sqlite3')))
     monkeypatch.delenv('YAM_ASPIRE_CONFIG', raising=False)
     monkeypatch.setitem(sys.modules, PLUGIN, None)

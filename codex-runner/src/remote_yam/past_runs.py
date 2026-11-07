@@ -72,6 +72,37 @@ def run_result(meta):
             'errors': reason if label == 'Failure' else None}
 
 
+_SETTLE_PHASES = {
+    'approach': 'approach', 'descend': 'descent', 'close': 'grasp',
+    'lift': 'lifting', 'carry': 'transfer', 'lower': 'lowering',
+    'open': 'release', 'retreat': 'retreat', 'return_to_start': 'return to start',
+}
+_SETTLE_MESSAGE = 'Robot stopped: arm did not settle during '
+_SETTLE_BLOCKER = (r'(?:measured_position|commanded_position|joint_speed|'
+                   r'commanded_gripper|measured_gripper|stable_interval)')
+_SETTLE_DEC3 = r'[0-9]{1,4}\.[0-9]{3}'
+_SETTLE_DEC4 = r'[0-9]{1,4}\.[0-9]{4}'
+_SETTLE_DETAIL = re.compile(
+    rf'Measured target did not settle: ([a-z_]{{1,15}}); '
+    rf'blocked_by={_SETTLE_BLOCKER}(?:,{_SETTLE_BLOCKER}){{0,4}}; '
+    rf'measured_joint_[1-6]_error_deg={_SETTLE_DEC3}; '
+    rf'commanded_joint_[1-6]_error_deg={_SETTLE_DEC3}; allowed_deg={_SETTLE_DEC3}; '
+    rf'max_joint_speed_rad_s={_SETTLE_DEC4} \(limit 0\.05\); '
+    rf'gripper_measured=-?{_SETTLE_DEC4},commanded=-?{_SETTLE_DEC4},goal=-?{_SETTLE_DEC4}; '
+    rf'stable_s={_SETTLE_DEC3} \(required 0\.15\)'
+)
+
+
+def _public_measured_settle_diagnostic(error):
+    # Retain only the known stage, including when the next filter sees our text.
+    error = error.removeprefix('RuntimeError: ')
+    if error.startswith(_SETTLE_MESSAGE):
+        return error if error[len(_SETTLE_MESSAGE):] in _SETTLE_PHASES.values() else None
+    detail = _SETTLE_DETAIL.fullmatch(error)
+    phase = _SETTLE_PHASES.get(detail.group(1)) if detail else None
+    return _SETTLE_MESSAGE + phase if phase else None
+
+
 def public_runner_diagnostic(state):
     """Preserve allowlisted diagnostics; never include arbitrary provider text."""
     from .runner_failures import failure_from_state
@@ -81,6 +112,24 @@ def public_runner_diagnostic(state):
     error = state.get('error')
     if not isinstance(error, str):
         return None
+    # Native workspace guards expose only the affected arm, never provider text.
+    workspace = re.fullmatch(
+        r'(?:RuntimeError: |ValueError: )?(?:(left|right)_tip_outside_workspace at waypoint [0-9]{1,4}|'
+        r'Robot safety stop: (left|right) tip left the configured workspace)', error)
+    if workspace:
+        side = workspace.group(1) or workspace.group(2)
+        return f'Robot safety stop: {side} tip left the configured workspace'
+    settle = _public_measured_settle_diagnostic(error)
+    if settle:
+        return settle
+    # Fixed provider diagnostics contain no model text or private context.
+    for message in ('Wait for both arms to settle before preparing a chunk',
+                    'Arms did not settle before motion planning',
+                    'Model returned duplicate object labels; no task motion started',
+                    'Motion completed; placement verification was inconclusive',
+                    'Motion completed; requested placement was not achieved'):
+        if error in {message, 'RuntimeError: ' + message, 'ValueError: ' + message}:
+            return message
     # GR00T rejects the whole chunk before dispatch. Preserve this reason in
     # both the live banner and saved result without exposing arbitrary text.
     scalar = r'[0-9]{1,20}(?:\.[0-9]{1,20})?(?:[eE][+-]?[0-9]{1,3})?'
@@ -96,6 +145,12 @@ def public_runner_diagnostic(state):
     ):
         if error in {message, 'ValueError: ' + message}:
             return message
+    # Object labels are provider text. Publish only the fixed reason, including
+    # on the second pass through a hosted policy's public diagnostic filter.
+    if re.fullmatch(
+            r'(?:ValueError: |RuntimeError: )?(?:No depth for selected object|'
+            r'No valid depth for [^\r\n]{1,200})', error):
+        return 'No depth for selected object'
     # CameraFrameSource emits a fixed diagnostic without response bodies/URLs.
     # Retain it in the live banner and saved result instead of hiding the cause.
     camera = r'left|right|top|observer|overhead|side|front|wrist'
@@ -222,9 +277,16 @@ class RunNames:
                 return None
             row = db.execute('SELECT robot_id,task,started_at FROM run_metadata WHERE episode_id=? AND robot_id=?',
                              (episode_id, robot_id)).fetchone()
+            configuration = None
+            if db.execute("SELECT name FROM sqlite_master WHERE name='run_configuration'").fetchone():
+                configuration = db.execute('SELECT configuration FROM run_configuration WHERE episode_id=?',
+                                           (episode_id,)).fetchone()
         if row is None:
             return None
+        configuration = json.loads(configuration[0]) if configuration else {}
         return {'episode_id':episode_id, 'robot_id':row[0], 'prompt':row[1], 'started_at':row[2],
+                'model':recorded_model(configuration.get('model')),
+                'model_version':recorded_model(configuration.get('model_version')),
                 'episode_index':None, 'video_status':'processing', 'video_url':None,
                 'video_duration_s':None, 'camera_order':[]}
 
@@ -295,8 +357,11 @@ class RunNames:
             errors = reason
         elif state.get('error'):
             from .run_errors import public_run_error
-            result, reason = 'Failure', public_run_error(state)
-            errors = reason
+            reason = public_run_error(state)
+            # Inconclusive visual evidence does not prove physical task failure.
+            # Robot failures, deadlines and safety errors retain priority above.
+            result = 'Unknown' if reason == 'Motion completed; placement verification was inconclusive' else 'Failure'
+            errors = reason if result == 'Failure' else None
         elif ending:
             result = 'Failure' if ending[0] == 'give_up' else 'Success'
             reason = ending[1]
@@ -341,7 +406,7 @@ class RunNames:
                 result, reason, errors = 'Stopped', 'Run reached time limit', None
             db.execute('INSERT INTO run_details VALUES (?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET errors=COALESCE(excluded.errors,errors), ending_reason=COALESCE(excluded.ending_reason,ending_reason)',
                        (episode_id, errors, ending[1] if ending else None))
-            if reason == 'Run reached time limit':
+            if reason in {'Run reached time limit', 'Motion completed; placement verification was inconclusive'}:
                 db.execute('UPDATE run_details SET errors=NULL, ending_reason=? WHERE episode_id=?', (reason, episode_id))
             db.execute('INSERT INTO run_results VALUES (?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET result=excluded.result, reason=excluded.reason WHERE result != excluded.result OR reason != excluded.reason', (episode_id, result, reason))
 
@@ -397,6 +462,9 @@ class PastRuns:
         self.rows = None
         self.updated = 0
         self.details = {}
+        self.detail_lock = threading.Lock()
+        self.detail_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='past-run-details')
+        self.pending_details = {}
         self.viewing = {}
 
     def get(self, episode_id):
@@ -405,7 +473,7 @@ class PastRuns:
         rows = self.page(episode_id=episode_id)['runs']
         return rows[0] if rows else None
 
-    def page(self, offset=0, *, episode_id=None, episode_ids=None, robot_id=None, model='', query=''):
+    def page(self, offset=0, *, episode_id=None, episode_ids=None, robot_id=None, model='', query='', metadata=False, models=None):
         with self.lock:
             stale = False
             if self.rows is None or time.monotonic() - self.updated > 60:
@@ -432,7 +500,7 @@ class PastRuns:
                             rows.append({'episode_id':eid, 'episode_index':None,
                                          'started_at':item['started_at'], 'prompt':item.get('task') or 'Task unavailable',
                                          'original_available':item.get('original_available', False),
-                                         'model':item.get('model'),
+                                         'model':item.get('model'), 'model_version':recorded_model(item.get('model_version')),
                                          'robot_id':item.get('robot_id', 'yam-1')})
                     for row in sources:
                         if not re.fullmatch(r'ep_[A-Za-z0-9_-]+', row.get('episode_id', '')):
@@ -445,6 +513,7 @@ class PastRuns:
                         rows.append({'episode_id': row['episode_id'], 'episode_index': row['episode_index'],
                                      'robot_id':row.get('robot_id', 'yam-1'),
                                      'model':row.get('model') or viewing.get(row['episode_id'], {}).get('model'),
+                                     'model_version':recorded_model(row.get('model_version') or viewing.get(row['episode_id'], {}).get('model_version')),
                                      'started_at': row['recorded_at'], 'prompt': '\n'.join(prompts) or 'Task unavailable'})
                     # Explicitly excluded by the operator, including incomplete recordings.
                     rows = [r for r in rows if (self.robot_id is None or r['robot_id'] == self.robot_id) and ' '.join(r['prompt'].split()).casefold().rstrip('.') != 'raise and lower both arms for three cycles']
@@ -459,28 +528,92 @@ class PastRuns:
             recorded_models = self.model_reader() if self.model_reader else {}
             available = [dict(r, model=recorded_model(recorded_models.get(r['episode_id'])) or recorded_model(r.get('model')))
                          for r in available]
+            selected_models = models
             models = sorted({r['model'] for r in available if r['model']}, key=str.casefold)
             if any(r['model'] is None for r in available):
                 models.append('__unrecorded__')
             if model:
                 available = [r for r in available if (r['model'] or '__unrecorded__') == model]
+            if selected_models:
+                available = [r for r in available if (r['model'] or '__unrecorded__') in selected_models]
             if query.strip() and episode_id is None:
                 from .run_search import rank_runs
                 available = rank_runs(available, query)
+            if metadata:
+                # Ready viewing-index hints need no per-episode fetch or media IO.
+                # Assessment/result detail still loads separately when opening a run.
+                result = []
+                for row in available:
+                    item = dict(row)
+                    hint = self._preview_hint(row['episode_id'])
+                    if hint:
+                        item['preview'] = hint
+                    result.append(item)
+                return {'runs': result, 'next_offset': None,
+                        'stale': stale, 'total': len(available), 'models': models}
             selected = ([r for r in available if r['episode_id'] == episode_id]
                         if episode_id is not None else available[offset:offset+12])
-            now = time.monotonic()
-            missing = [r for r in selected if r['episode_id'] not in self.details or now-self.details[r['episode_id']][0] > 60]
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                for eid, detail in pool.map(self._detail, missing):
-                    self.details[eid] = (now, detail)
-            # Bound caches as the archive grows.
-            if len(self.details) > 240:
-                wanted = {r['episode_id'] for r in selected}
-                self.details = {k: v for k, v in self.details.items() if k in wanted}
-            result = [dict(r, **self.details[r['episode_id']][1]) for r in selected]
-            return {'runs': result, 'next_offset': offset+len(selected) if offset+len(selected) < len(available) else None,
-                    'stale': stale, 'total': len(available), 'models': models}
+        # Recording IO must never hold the catalog lock: other visitors may be
+        # browsing the cloud while a remote episode file is slow or unavailable.
+        result = self._with_details(selected)
+        return {'runs': result, 'next_offset': offset+len(selected) if offset+len(selected) < len(available) else None,
+                'stale': stale, 'total': len(available), 'models': models}
+
+    def _preview_hint(self, episode_id):
+        preview = (self.viewing.get(episode_id) or {}).get('preview')
+        if not isinstance(preview, dict):
+            return None
+        speed, duration = preview.get('speed'), preview.get('duration_s')
+        if (type(speed) not in (int, float) or not math.isfinite(speed) or not 1 <= speed <= 10
+                or type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0):
+            return None
+        cameras = preview.get('camera_order', ['left', 'top', 'right'])
+        if (not isinstance(cameras, list) or not 1 <= len(cameras) <= 4
+                or any(camera not in ('left', 'top', 'right', 'observer') for camera in cameras)):
+            return None
+        layout = preview.get('layout')
+        return {'video_url': BASE + f'viewing/{episode_id}.mp4', 'compressed': True,
+                'preview_speed': speed, 'video_duration_s': duration,
+                'camera_order': cameras, 'video_layout': layout if isinstance(layout, str) else None}
+
+    def details_for(self, rows):
+        """Enrich only the visible recording blocks, keeping full scores metadata-only."""
+        return self._with_details(rows)
+
+    def _with_details(self, selected):
+        now = time.monotonic()
+        ready, pending = {}, {}
+        # Share in-flight episode lookups across table, hover and replay requests.
+        # Only cache bookkeeping is locked; remote IO and waits happen outside it.
+        with self.detail_lock:
+            for row in selected:
+                eid = row['episode_id']
+                cached = self.details.get(eid)
+                if cached is not None and now-cached[0] <= 60:
+                    ready[eid] = cached[1]
+                    continue
+                future = self.pending_details.get(eid)
+                if future is None:
+                    future = self.detail_pool.submit(self._detail, row)
+                    self.pending_details[eid] = future
+                pending[eid] = future
+        for eid, future in pending.items():
+            try:
+                _, detail = future.result()
+            except BaseException:
+                with self.detail_lock:
+                    if self.pending_details.get(eid) is future:
+                        self.pending_details.pop(eid)
+                raise
+            with self.detail_lock:
+                if self.pending_details.get(eid) is future:
+                    self.details.pop(eid, None)
+                    self.details[eid] = (time.monotonic(), detail)
+                    self.pending_details.pop(eid)
+                    while len(self.details) > 240:
+                        self.details.pop(next(iter(self.details)))
+            ready[eid] = detail
+        return [dict(row, **ready[row['episode_id']]) for row in selected]
 
     def _detail(self, row):
         eid = row['episode_id']
@@ -508,3 +641,4 @@ class PastRuns:
                      'preview_speed': speed if compressed else None,
                      'video_layout': video_meta.get('layout'),
                      'camera_order': preview.get('camera_order', ['left', 'top', 'right']) if compressed else ['left', 'top', 'right']}
+

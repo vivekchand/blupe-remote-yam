@@ -18,11 +18,13 @@ from .feedback import feedback_decision, feedback_fields
 from .providers import PolicyComplete, ProviderAdapter
 from .interactions import InteractionLog
 from .latency_spans import journal_span
+from .cadence import trajectory_cadence
 from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET, SCHEMA_VERSION, TERMINAL_STATES, SessionAPI, SessionAPIError, SessionEventStream
 
 
 FEEDBACK_WAIT_S = 5.0
 FEEDBACK_POLL_S = 0.5
+MAX_POSE_REPLANS = 2
 
 
 class RunnerController(HomeSceneStartup):
@@ -141,11 +143,14 @@ class RunnerController(HomeSceneStartup):
         admission = getattr(provider, 'validate_session_admission', None)
         if callable(admission):
             admission(self._session_api)
-        self._command_limit = command_budget(getattr(provider, 'provider_name', ''), run_duration_s)
+        cadence_hz = trajectory_cadence(getattr(provider, "trajectory_cadence_hz", 10))
+        self._command_limit = command_budget(getattr(provider, 'provider_name', ''), run_duration_s, cadence_hz)
         configure_duration = getattr(provider, 'configure_run_duration', None)
         if getattr(provider, 'provider_name', '') in ('dream', 'dream_flash') and callable(configure_duration):
             configure_duration(run_duration_s)
         duration_options = {}
+        if cadence_hz != 10:
+            duration_options["cadence_hz"] = cadence_hz
         if run_duration_s != 300:
             duration_options['run_duration_s'] = run_duration_s
         # Extended Dream runs carry their provider through admission and the
@@ -754,6 +759,13 @@ class RunnerController(HomeSceneStartup):
                 })
         entries.sort(key=lambda entry: entry["position"])
         with self._lock:
+            # Keep the actual backend queue-entry time for this owned request.
+            # Never substitute a poll/Run timestamp or another person's entry.
+            own = next((entry for entry in entries if entry['session_id'] == self._session_id), None)
+            if (own and math.isfinite(own['created_at']) and own['created_at'] > 0
+                    and not any(event.get('type') == 'queue_entry' for event in self._run_events)):
+                self._run_events.append(dict(type='queue_entry', timestamp=own['created_at'],
+                    state=own['status'], position=own['position'], source='queue_snapshot'))
             self._queue_snapshot = {
                 "schema_version": SCHEMA_VERSION, "type": "queue_snapshot",
                 "generated_at": float(response.get("generated_at", 0)),
@@ -805,6 +817,13 @@ class RunnerController(HomeSceneStartup):
                 summary["step_id"] = event_step
             if isinstance(payload.get("replayed"), bool):
                 summary["replayed"] = payload["replayed"]
+            # Preserve source lifecycle timing without exposing capabilities,
+            # contact details or commands. Used to distinguish queue admission
+            # from post-Home method latency in physical verification.
+            if event_type in {"lifecycle", "queue_update"}:
+                for key in ("state", "previous_state", "reason", "position", "depth"):
+                    if isinstance(payload.get(key), (str, int, float)):
+                        summary[key] = payload[key]
             self._run_events.append(summary)
             self._run_events = self._run_events[-512:]
         if event_type == "snapshot":
@@ -977,7 +996,7 @@ class RunnerController(HomeSceneStartup):
         if step_id >= self._command_limit:
             raise RuntimeError(f"Session command limit of {self._command_limit} reached")
         readiness = getattr(provider, 'wait_ready', None)
-        timing_sink = self._interactions.add if getattr(provider, 'provider_name', '') in {'dream', 'dream_flash'} else None
+        timing_sink = self._interactions.add if getattr(provider, 'provider_name', '') in {'dream', 'dream_flash', 'roboharness'} else None
         if timing_sink and step_id == 0:
             observed = payload.get('observed_at')
             timing_sink('policy_timing', 'Home observation received', stage='home_observation_received',
@@ -1065,7 +1084,12 @@ class RunnerController(HomeSceneStartup):
         if trajectory is not None:
             self._trajectory_final_observation(provider, provider_observation, observation_step)
             with self._lock:
-                self._trajectory["final_payload"] = dict(payload)
+                # The policy completion callback needs the same hardware context
+                # that passed reconciliation, not the context-free wire sample.
+                # Keep the original gateway payload separately for diagnostics;
+                # its observed_at/lease/cursor are not rewritten.
+                self._trajectory["raw_final_payload"] = dict(payload)
+                self._trajectory["final_payload"] = dict(provider_observation)
             return
         reconciled_observation = getattr(provider, 'reconciled_observation', None)
         if callable(reconciled_observation):
@@ -1255,16 +1279,34 @@ class RunnerController(HomeSceneStartup):
         episode_id: str,
         lease_id: str,
         first_step_id: int,
+        *,
+        _pose_replans: int = 0,
+        _recovery_source=None,
     ) -> None:
         with self._lock:
             source_attempt_id = self._attempt_id
+            source_robot_id = self._robot_id
+            source_session_api = self._session_api
+            source_api_origin = getattr(source_session_api, '_base_url', None)
+        if _recovery_source is not None:
+            old_attempt, old_robot, old_api, old_origin = _recovery_source
+            if (source_attempt_id != old_attempt or source_robot_id != old_robot
+                    or source_session_api is not old_api or source_api_origin != old_origin):
+                return
+            with self._lock:
+                if self._command_step_id != first_step_id or self._trajectory is not None:
+                    raise RuntimeError('Command cursor changed before plan recovery; packet refused')
         def still_running():
             with self._lock:
                 return (not self._provider_cancelled(provider) and self._status == "running"
                         and self._provider is provider and self._session_id == session_id
                         and self._episode_id == episode_id and self._lease_id == lease_id
-                        and self._attempt_id == source_attempt_id)
+                        and self._attempt_id == source_attempt_id and self._robot_id == source_robot_id
+                        and self._session_api is source_session_api
+                        and getattr(source_session_api, '_base_url', None) == source_api_origin)
 
+        if not still_running():
+            return
         if hasattr(provider, "cancelled"):
             provider.cancelled = lambda: not still_running()
         if hasattr(provider, 'refresh_observation'):
@@ -1356,6 +1398,11 @@ class RunnerController(HomeSceneStartup):
                         raise RuntimeError('Home pose changed while planning')
         if not still_running():
             return
+        decision_callback = self.trajectory_decision
+        if decision_callback is not None:
+            # Freeze provider-owned containers before observation I/O can yield.
+            # The callback and transport must inspect the same exact packet.
+            waypoints, observation = deepcopy(waypoints), deepcopy(observation)
         if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= MAX_WAYPOINTS_PER_PACKET:
             raise RuntimeError(f"Trajectory provider must return 1..{MAX_WAYPOINTS_PER_PACKET} waypoints")
         expected_steps = list(range(first_step_id, first_step_id + len(waypoints)))
@@ -1381,12 +1428,13 @@ class RunnerController(HomeSceneStartup):
                     previous = current
             except Exception:
                 path_segments = []
+        cadence_hz = trajectory_cadence(getattr(provider, "trajectory_cadence_hz", 10))
         trajectory_id = f"traj_{episode_id}_{first_step_id}"
         state = {
             "trajectory_id": trajectory_id,
             "path_segments": path_segments,
             "state": "dispatching",
-            "cadence_hz": 10.0,
+            "cadence_hz": cadence_hz,
             "first_step_id": expected_steps[0],
             "last_step_id": expected_steps[-1],
             "waypoint_count": len(expected_steps),
@@ -1403,24 +1451,159 @@ class RunnerController(HomeSceneStartup):
             "step_number": step_number,
             "gap_s": max(0.0, model_started - previous_completed) if previous_completed is not None else None,
         }
-        decision_callback = self.trajectory_decision
         if decision_callback is not None:
             # Apply the transport's exact numeric/shape validation before a
             # trusted enforcement decision. Ignore normalized copies: callbacks
             # have no path to rewrite native packet targets.
             from .session import _trajectory_waypoints
             _trajectory_waypoints(waypoints, self._joint_counts)
+            decision_observation = observation
+            if observation.get('source') == 'hardware':
+                def checked_session():
+                    if not still_running():
+                        return False
+                    try:
+                        live = source_session_api.get_session(session_id)
+                    except BaseException:
+                        if not still_running():
+                            return False
+                        raise RuntimeError('Installed trajectory decision feedback is unavailable; packet refused') from None
+                    if not still_running():
+                        return False
+                    if (not isinstance(live, Mapping) or live.get('session_id') != session_id
+                            or live.get('status') != 'running' or live.get('episode_id') != episode_id
+                            or live.get('lease_id') != lease_id
+                            or type(live.get('latest_observation_step')) is not int
+                            or live['latest_observation_step'] != first_step_id
+                            or 'active_trajectory' not in live or live['active_trajectory'] is not None):
+                        raise RuntimeError('Session changed before installed trajectory decision; packet refused')
+                    return True
+
+                # A monitor sample alone cannot establish lease/cursor identity.
+                # Sandwich a fresh station read between authoritative session
+                # checks; never rewrite the packet built from the planning pose.
+                if not checked_session():
+                    return
+                try:
+                    response = source_session_api.get_robot_observation(source_robot_id)
+                except BaseException:
+                    if not still_running():
+                        return
+                    raise RuntimeError('Installed trajectory decision feedback is unavailable; packet refused') from None
+                if not still_running():
+                    return
+                fresh = (response.get('observation') or response.get('payload') or response) if isinstance(response, Mapping) else None
+                if (not isinstance(fresh, Mapping) or fresh.get('jetson_id') != source_robot_id
+                        or fresh.get('robot_id', source_robot_id) != source_robot_id
+                        or fresh.get('source') != 'hardware'):
+                    raise RuntimeError('Robot changed before installed trajectory decision; packet refused')
+                if not checked_session():
+                    return
+                decision, reason = feedback_decision(fresh, fresh, now=time.time(), require_home=first_step_id == 0)
+                if fresh.get('mode') in ('EXECUTING', 'HOMING'):
+                    decision, reason = 'reject', 'station_not_explicitly_settled'
+                if decision != 'ready':
+                    self._interactions.add('feedback_check', 'Hardware feedback blocked before Guard decision',
+                                           state=decision, reason_code=reason, step_id=first_step_id,
+                                           trajectory_id=trajectory_id, station=feedback_fields(fresh))
+                    raise RuntimeError('Hardware feedback blocked before installed trajectory decision; packet refused')
+                previous_stamp, fresh_stamp = observation.get('observed_at'), fresh.get('observed_at')
+                if (type(previous_stamp) not in (int, float) or not math.isfinite(previous_stamp)
+                        or type(fresh_stamp) not in (int, float) or not math.isfinite(fresh_stamp)
+                        or fresh_stamp < previous_stamp):
+                    raise RuntimeError('Feedback clock changed before installed trajectory decision; packet refused')
+                pose_changed = False
+                for side, count in zip(('left', 'right'), self._joint_counts):
+                    before, after = observation.get(side+'_joints_deg'), fresh.get(side+'_joints_deg')
+                    if (not isinstance(before, (list, tuple)) or not isinstance(after, (list, tuple))
+                            or len(before) != count or len(after) != count
+                            or any(type(value) not in (int, float) or not math.isfinite(value)
+                                   for value in (*before, *after))):
+                        raise RuntimeError('Joint pose changed before installed trajectory decision; packet refused')
+                    pose_changed |= any(abs(a-b) > .25 for a,b in zip(before, after))
+                    if count:
+                        grips = (observation.get(side+'_gripper'), fresh.get(side+'_gripper'))
+                        if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+                                for value in grips):
+                            raise RuntimeError('Gripper pose changed before installed trajectory decision; packet refused')
+                        pose_changed |= abs(grips[0]-grips[1]) > .01
+                if pose_changed:
+                    # No dispatch/acceptance has occurred. A supported provider
+                    # must explicitly resolve and discard this exact pending
+                    # tool, then plan anew with fresh images at the SAME cursor.
+                    # Never route Guard refusals or transport failures here.
+                    discard = getattr(provider, 'discard_unsubmitted_trajectory', None)
+                    replan = getattr(provider, 'build_trajectory', None)
+                    if (not callable(discard) or not callable(replan)
+                            or (first_step_id == 0 and self._home_registered)):
+                        raise RuntimeError('Joint pose changed before installed trajectory decision; packet refused')
+                    if _pose_replans >= MAX_POSE_REPLANS:
+                        self._interactions.add('plan_recovery', 'Fresh-plan recovery limit reached; no new motion sent',
+                            state='exhausted', reason_code='pre_dispatch_pose_changed',
+                            retry_count=_pose_replans, retry_limit=MAX_POSE_REPLANS,
+                            step_id=first_step_id, trajectory_id=trajectory_id,
+                            dispatched=False, executed_waypoints=0)
+                        raise RuntimeError('Robot pose kept changing while planning; recovery limit reached before dispatch')
+                    if not still_running():
+                        return
+                    with self._lock:
+                        if self._trajectory is not None or self._command_step_id != first_step_id:
+                            raise RuntimeError('Command cursor changed before plan recovery; packet refused')
+                    # Build from the new source, not an old planning-scene or
+                    # image reference. Lease data stays private to the provider.
+                    recovery_observation = {**self._public_observation(fresh),
+                        'episode_id':episode_id, 'lease_id':lease_id, 'step_id':first_step_id}
+                    reconcile = getattr(provider, 'refresh_reconciled_observation', None)
+                    if callable(reconcile):
+                        recovery_observation = reconcile(observation, recovery_observation)
+                    context = dict(robot_id=source_robot_id, session_id=session_id,
+                        episode_id=episode_id, first_step_id=first_step_id,
+                        reason_code='pre_dispatch_pose_changed', dispatched=False, executed_waypoints=0)
+                    if discard(deepcopy(waypoints), first_step_id=first_step_id,
+                            observation=deepcopy(recovery_observation), context=context) is not True:
+                        raise RuntimeError('Unsubmitted plan discard was not confirmed; packet refused')
+                    if not still_running() or not checked_session():
+                        return
+                    self.update_monitor_observation(fresh)
+                    self._interactions.add('plan_recovery', 'Robot pose changed; capturing a fresh view and replanning',
+                        state='replanning', reason_code='pre_dispatch_pose_changed',
+                        retry_count=_pose_replans+1, retry_limit=MAX_POSE_REPLANS,
+                        step_id=first_step_id, trajectory_id=trajectory_id,
+                        dispatched=False, executed_waypoints=0)
+                    if not still_running():
+                        return
+                    return self._dispatch_trajectory(replan, provider, prompt,
+                        recovery_observation, session_id, episode_id, lease_id, first_step_id,
+                        _pose_replans=_pose_replans+1,
+                        _recovery_source=(source_attempt_id,source_robot_id,source_session_api,source_api_origin))
+                if not still_running():
+                    return
+                self.update_monitor_observation(fresh)
+                decision_observation = {**observation, **self._public_observation(fresh),
+                    'episode_id':episode_id, 'step_id':first_step_id, 'settled_after':fresh_stamp}
+                self._interactions.add('observation', 'Fresh measured feedback before Guard decision',
+                    step_id=first_step_id, trajectory_id=trajectory_id, observed_at=fresh_stamp,
+                    planning_observed_at=previous_stamp, feedback_basis='pre_dispatch_authoritative',
+                    source='hardware', settled=fresh.get('settled'), homed=fresh.get('homed'),
+                    left_joints_deg=list(fresh['left_joints_deg']), right_joints_deg=list(fresh['right_joints_deg']),
+                    left_gripper=fresh.get('left_gripper'), right_gripper=fresh.get('right_gripper'))
+                if not still_running():
+                    return
             context = dict(attempt_id=source_attempt_id, session_id=session_id,
                 episode_id=episode_id, robot_id=self._robot_id,
                 trajectory_id=trajectory_id, first_step_id=first_step_id,
-                cadence_hz=10)
-            observed_at = observation.get('observed_at')
+                cadence_hz=cadence_hz)
+            if decision_observation is not observation:
+                context.update(planning_observed_at=observation['observed_at'],
+                    decision_feedback_observed_at=decision_observation['observed_at'],
+                    decision_feedback_basis='pre_dispatch_authoritative')
+            observed_at = decision_observation.get('observed_at')
             if type(observed_at) in (int, float) and math.isfinite(observed_at):
                 context['observed_at'] = observed_at
             if observation.get('source') in ('hardware', 'simulation'):
                 context['source'] = observation['source']
             try:
-                decision = decision_callback(deepcopy(waypoints), deepcopy(observation), deepcopy(context))
+                decision = decision_callback(deepcopy(waypoints), deepcopy(decision_observation), deepcopy(context))
             except BaseException:
                 raise RuntimeError('Installed trajectory decision is unavailable; packet refused') from None
             # A Stop or replacement during a slow callback wins even over allow.
@@ -1437,7 +1620,7 @@ class RunnerController(HomeSceneStartup):
                 raise RuntimeError("A trajectory is already active")
             self._trajectory = state
         self._interactions.add('packet_submit', f'Sending {len(waypoints)} waypoints to AWS',
-                               trajectory_id=trajectory_id, cadence_hz=10, waypoint_count=len(waypoints),
+                               trajectory_id=trajectory_id, cadence_hz=cadence_hz, waypoint_count=len(waypoints),
                                waypoints=waypoints)
         receipt: dict[str, Any] | None = None
         for attempt in range(self._submit_attempts):
@@ -1450,7 +1633,7 @@ class RunnerController(HomeSceneStartup):
                     episode_id,
                     lease_id,
                     trajectory_id,
-                    10.0,
+                    cadence_hz,
                     waypoints,
                 )
                 break
@@ -1498,7 +1681,7 @@ class RunnerController(HomeSceneStartup):
             self._last_model_command = {
                 "type": "joint_trajectory",
                 "trajectory_id": trajectory_id,
-                "cadence_hz": 10.0,
+                "cadence_hz": cadence_hz,
                 "first_step_id": expected_steps[0],
                 "last_step_id": expected_steps[-1],
                 "waypoint_count": len(expected_steps),
@@ -2041,8 +2224,23 @@ class RunnerController(HomeSceneStartup):
                         self._lifecycle({}, {"state": "timed_out", "reason": "session_timeout"})
                         self._close_events()
                         return
+                    if terminal.get("status") == "safety_aborted":
+                        # A controller-local policy blocks event consumption while
+                        # polling. Its native abort can close the lease before the
+                        # next poll; recover the saved cause instead of reporting
+                        # the secondary inactive-session response.
+                        try:
+                            trace = self._session_api.get_episode_trace(failed_session)
+                            errors = trace.get("errors") or []
+                            if errors:
+                                self._handle_error(dict(errors[-1], category="hardware_safety", terminal=True))
+                        except Exception:
+                            pass
+                        self._lifecycle({}, {"state": "safety_aborted"})
+                        self._close_events()
+                        return
                 except Exception:
-                    pass  # No authoritative timeout: retain the original error.
+                    pass  # No authoritative terminal state: retain the original error.
             with self._lock:
                 session_id = self._session_id
                 self._error = f"{type(exc).__name__}: {exc}"

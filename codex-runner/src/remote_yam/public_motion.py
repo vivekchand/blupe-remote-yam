@@ -25,13 +25,14 @@ MOTION_KINDS = frozenset({
     'observation_recovered', 'worker_recovery',
     'stop_requested', 'stopped', 'policy_complete', 'home_scene',
     'feedback_check', 'feedback_timeout', 'reconnecting',
+    'plan_recovery',
 })
 
 # One advancing row per trajectory, matching the local journal's own compaction:
 # a 10 Hz waypoint stream becomes a live counter rather than hundreds of rows.
 ADVANCING_KINDS = frozenset({'packet_progress'})
 
-COUNTS = ('step_id', 'progress_count', 'waypoint_count', 'cadence_hz', 'steps',
+COUNTS = ('step_id', 'progress_count', 'waypoint_count', 'steps',
           'reported_progress', 'step')
 DURATIONS = ('elapsed_s', 'duration_s', 'total_s', 'started_at')
 TOKENS = ('stage', 'state', 'status', 'code', 'progress_type', 'reason_code')
@@ -99,6 +100,22 @@ def project_motion_event(event):
     details = details if isinstance(details, dict) else {}
     row = {'id': identity, 't': timestamp, 'kind': kind}
 
+    if kind == 'plan_recovery':
+        count, step = details.get('retry_count'), details.get('step_id')
+        trajectory = details.get('trajectory_id')
+        if (details.get('state') not in ('replanning', 'exhausted')
+                or details.get('reason_code') != 'pre_dispatch_pose_changed'
+                or type(count) is not int or not 0 <= count <= 2
+                or type(details.get('retry_limit')) is not int or details['retry_limit'] != 2
+                or _count(step) is None or not isinstance(trajectory, str) or not TRAJECTORY.fullmatch(trajectory)
+                or details.get('dispatched') is not False
+                or type(details.get('executed_waypoints')) is not int or details['executed_waypoints'] != 0):
+            return None
+        row.update(state=details['state'], reason_code='pre_dispatch_pose_changed',
+            retry_count=count, retry_limit=2, step_id=step, trajectory_id=trajectory,
+            dispatched=False, executed_waypoints=0)
+        return row
+
     trajectory = details.get('trajectory_id')
     if isinstance(trajectory, str) and TRAJECTORY.fullmatch(trajectory):
         row['trajectory_id'] = trajectory
@@ -106,6 +123,9 @@ def project_motion_event(event):
         value = _count(details.get(name))
         if value is not None:
             row[name] = value
+    cadence = _finite(details.get('cadence_hz'))
+    if cadence in (10, 20, 30):
+        row['cadence_hz'] = cadence
     for name in DURATIONS:
         value = _finite(details.get(name))
         if value is not None:

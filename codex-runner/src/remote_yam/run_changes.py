@@ -20,9 +20,6 @@ BUILD_HISTORY = build_history()
 def snapshot(provider, prompt, duration):
     config = provider.public_config()
     return {'model': config.get('model'), 'provider': config.get('provider'),
-            **({'automatic_retry_limit':config['automatic_retry_limit']} if 'automatic_retry_limit' in config else {}),
-            **({k:config[k] for k in ('execution_environment','code_revision_limit') if config.get(k) is not None}),
-            **({'launch_route':config['launch_route']} if config.get('launch_route') else {}),
             'reasoning': config.get('reasoning_effort'),
             'response_speed': config.get('response_speed'),
             'actual_response_speed': config.get('actual_response_speed'),
@@ -30,6 +27,10 @@ def snapshot(provider, prompt, duration):
             'system_prompt_sha256': config.get('system_prompt_sha256'),
             **({'controller_workspace': config['controller_workspace']}
                if config.get('controller_workspace') else {}),
+            **({'kinematic_calibration': config['kinematic_calibration']}
+               if config.get('kinematic_calibration') else {}),
+            **{key: config[key] for key in ('underlying_models','runner_name','execution_mode',
+                'calibration_id','model_calibration_id','prompt_sha256','grounding_camera','depth_grounding_roles') if key in config},
             'trajectory_speed': getattr(getattr(provider, '_geometry', None), 'speed_multiplier', None),
             'task_prompt': prompt, 'system_prompt': getattr(provider, '_system_prompt', None),
             'duration_s': duration, 'code_revision': BUILD_HISTORY[0]['revision'] if BUILD_HISTORY else None,
@@ -43,7 +44,8 @@ def changes(previous, current):
         return ['First recorded configuration; no earlier configuration available to compare.']
     notes = []
     for key, label in [('model', 'Model'), ('provider', 'Provider'), ('reasoning', 'Reasoning effort'),
-                       ('response_speed', 'Inference speed'), ('trajectory_speed', 'Trajectory speed'), ('duration_s', 'Run time limit')]:
+                       ('response_speed', 'Inference speed'), ('trajectory_speed', 'Trajectory speed'), ('duration_s', 'Run time limit'),
+                       ('grounding_camera','Depth camera')]:
         old, new = previous.get(key), current.get(key)
         if old != new:
             notes.append(f'{label}: {old if old is not None else "not recorded"} → {new if new is not None else "not recorded"}.')
