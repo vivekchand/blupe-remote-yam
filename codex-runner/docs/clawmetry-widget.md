@@ -2,11 +2,45 @@
 
 The optional panel sits inside the existing Blüpe playground. It receives the existing status flow and makes no status, model or camera request. Robot controls, queue admission and the camera viewer remain upstream-owned. The normal launcher loads none of these assets.
 
-## Design plan
+## Room layout and integration contact
 
-Use the playground's own paper, ink, line and Manrope/system typography. One compact disclosure directly after the camera/chat layout opens into paired columns for published decisions and execution/feedback. It takes normal page space before run history, outside the viewport-sized camera grid. The camera scene remains dominant. A visible source-age label ages even if polling stops. On a phone, the panel uses one column; no fixed overlay covers Run or Stop. Every selector is scoped to the panel.
+The optional integration uses the existing dark meeting console. Its header shows
+ClawMetry × BluPe, Robot room and the native navigation. ClawMetry is selected once
+at first mount and Activity opens after the native meeting shell is ready. Later
+tab selections and closing Activity remain authoritative. Ordinary BluPe loads
+none of these optional assets and keeps its own defaults.
 
-The palette inherits `--paper`, `--ink`, `--muted` and `--line`; restrained blue identifies ClawMetry, blue/amber identify the left/right arm readings. There is no decorative animation or replacement dashboard. This deliberately follows the actual robot console rather than introducing a separate marketing surface.
+On desktop, the main camera is beside a wider Activity column; other camera tiles
+sit below the main camera. On narrow or short screens, cameras, Activity and the
+native prompt stack vertically. Native camera expansion, Stop, queue admission
+and conversation controls retain their owners. Scoped optional CSS changes grid
+placement without rebuilding camera or control elements.
+
+Integrate your robot opens an email-only contact dialog on the canonical
+ClawMetry playground. Other hosts link to that canonical form. An explicit form
+submission sends `{email, consent:true}` once to the same-origin
+`POST /api/robot-integration` endpoint with `X-Clawmetry-Contact: 1`, without
+cookies. The private hosting application owns validation, storage and email
+follow-up. This form does not write to robot records, newsletter lists or
+browser storage. Success acknowledges a saved request and offers the configured
+meeting link; it does not claim that an email was delivered. Failed submissions
+retain the email for a deliberate retry. There is no background contact request.
+
+## Readable activity
+
+`clawmetry-activity.js` summarizes projected native motion rows into a bounded
+story of model stage timings, submitted targets, gateway receipts and encoder
+feedback. Progress folds per trajectory and only the latest feedback row remains
+in the primary list; technical Details retain the larger journal window. Native
+journal IDs establish native order. Unchanged snapshots retain the existing row
+nodes and scroll position.
+
+A separate model card uses only sharing-approved model events and the actual
+reported model identity. It is not joined causally to the native journal or Guard
+sequence. Latest Guard evidence remains separate and requires its existing
+recorded provenance. Request duration, gateway acceptance, packet completion and
+encoder readings are distinct from verified task success. No raw HTTP payload,
+private reasoning or arbitrary native message enters the primary activity list.
 
 ## Move log tab
 
@@ -41,7 +75,7 @@ the journal's own monotonic sequence so an idle journal is not re-projected for
 every visitor's poll. The browser accumulates up to 500 rows per run so a long
 run's early moves survive the server window sliding past them. Measured payload
 for a realistic twelve-packet run: 73 rows, 17KB per poll; the full 200-row
-window is 50KB. Nothing here adds a request, poll, socket or camera.
+window is 50KB. Activity rendering adds no request, poll, socket or camera. The contact form is the separate explicit POST described above.
 
 The station's own journal is the only source. When the published run belongs to
 another host, or the journal cannot be read, the tab names that gap
@@ -50,7 +84,7 @@ empty move log reads as a robot that never moved.
 
 ## Application contract
 
-Inject `telemetry-status.js`, `clawmetry-widget.css` and `clawmetry-widget.js` through the existing `application-head` slot. Scripts must load before the deferred `hosted.js`.
+Inject `telemetry-status.js`, `clawmetry-activity.js`, `clawmetry-room.js`, `clawmetry-widget.css` and `clawmetry-widget.js` through the existing `application-head` slot. Scripts load before the deferred `hosted.js`. Room branding finishes at DOMContentLoaded after the later native meeting script creates its shell.
 
 `hosted.js` calls optional `window.yamTelemetry.observe(view)` after the existing run/robot guards. The neutral projection is `window.YamTelemetryStatus.project(state, {robot_id, displayed_identity, received_at_s})`, schema `yam.telemetry.v1`. The displayed identity contains only the existing guarded run's attempt/run/episode IDs; a stale public run cannot fill a new attempt's gap. New submissions call the optional payload-free `reset` observer to clear old browser evidence. Poll failures call `window.yamTelemetry.connection(view)`. Observer exceptions and rejected promises do not affect controls.
 
@@ -155,6 +189,6 @@ no images, public event or poll; service observation can preserve exact provenan
 
 ### Latest upstream carry-forward (local validation)
 
-This composition is based on Andrew's shared upstream commit `04d8d2768172ee0b1fc290c3b2a3bb25995b18db`. The meeting shell, run library, task cloud, durable native recordings and configurable cadence remain upstream-owned. ClawMetry adds its optional tab through `application-head`; it does not select the initial tab or override the meeting palette. Status still comes from the native fetch, with no additional widget poller. The pre-dispatch callback and private Dream capture receive the actual selected cadence.
+This composition is based on Andrew's shared upstream commit `04d8d2768172ee0b1fc290c3b2a3bb25995b18db`. The meeting shell, run library, task cloud, durable native recordings and configurable cadence remain upstream-owned. ClawMetry adds its optional tab through `application-head`; it selects ClawMetry once as the initial Activity tab and extends the existing dark meeting palette with scoped optional CSS. Status still comes from the native fetch, with no additional widget poller. The pre-dispatch callback and private Dream capture receive the actual selected cadence.
 
-The new upstream optional task-cloud stack includes `sentence-transformers`, `umap-learn` and `numba`; these are not required by the optional ClawMetry pane and have not been installed during this local carry-forward. Existing native public-catalog proxy behavior remains unchanged. Live browser acceptance, local Pro attachment and a physical run require separate operator verification. No deployment or physical run is part of this source carry-forward.
+The new upstream optional task-cloud stack includes `sentence-transformers`, `umap-learn` and `numba`; these are not required by the optional ClawMetry pane and have not been installed during this local carry-forward. Existing native public-catalog proxy behavior remains unchanged. Live browser acceptance, local Pro attachment and a physical run require separate operator verification. The carry-forward itself commanded no physical run. Subsequent optional room changes retain the same control and sharing contracts.

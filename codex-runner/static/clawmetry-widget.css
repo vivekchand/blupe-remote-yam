@@ -117,3 +117,92 @@
 #clawmetryMotionPanel>.cm-review-expand{position:absolute;top:7px;right:14px;font-size:11px}
 #clawmetryMotionPanel.cm-review-expanded{position:fixed}
 #clawmetryMotionPanel>.cm-brand{padding-right:112px}
+
+/* The integrated room gives the decision story a full column. Native camera
+   elements and controls stay in place; only their grid placement changes. */
+.meetingConsole.clawmetryRoom .meetingRoom .intro{min-width:0;max-width:100%;flex:1 1 540px;flex-wrap:wrap}
+.meetingConsole.clawmetryRoom .meetingRoom .playgroundHeader{height:auto;min-height:64px;padding-block:8px;flex-wrap:wrap}
+.meetingConsole.clawmetryRoom .meetingRoom .cm-room-brand{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.meetingConsole.clawmetryRoom .cm-room-logo{display:block;width:auto;height:38px;max-width:none}
+.meetingConsole.clawmetryRoom .cm-room-brand-x{font-size:17px;font-weight:400;color:#aebac1}
+.meetingConsole.clawmetryRoom .cm-room-blupe{font-size:23px;font-weight:700;letter-spacing:-.6px}
+.meetingConsole.clawmetryRoom .cm-room-integrate{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:7px 12px;border:1px solid #447a70;border-radius:8px;color:#9de5d0;text-decoration:none;font-size:13px;font-weight:600;white-space:nowrap}
+.meetingConsole.clawmetryRoom .cm-room-integrate:hover{background:#1d3736;border-color:#7ce0c3}
+.meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .watchLayout{grid-template-columns:minmax(0,1fr) clamp(360px,36vw,520px);grid-template-areas:"video chat"}
+.meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras{grid-template-columns:repeat(var(--meeting-side-count,3),minmax(0,1fr));grid-template-rows:minmax(0,1fr) clamp(76px,13dvh,120px);gap:10px}
+.meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras>figure[data-camera-role]{grid-column:auto;grid-row:2;justify-self:stretch;width:auto;max-width:none;margin:0}
+.meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras>figure[data-meeting-main]{grid-column:1/-1;grid-row:1}
+.meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras[data-meeting-count="1"],.meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.meetingConsole.clawmetryRoom .meetingRoom .liveStopwatch{left:50%}
+.meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .watchInteraction{position:relative;inset:auto;width:100%;height:100%;box-shadow:none;z-index:auto;animation:none}
+.meetingConsole.clawmetryRoom .meetingBar{position:sticky;bottom:0;z-index:25;background:#202124}
+.meetingConsole.clawmetryRoom .runLabelSource{min-width:0;max-width:100%}
+.meetingConsole.clawmetryRoom .runLabelSource select{min-width:0;max-width:100%}
+#clawmetryMotionPanel .cm-model-update{padding:10px 12px;margin:0 0 10px;border-left:2px solid #9fb7ed;background:#1a2733;border-radius:0 8px 8px 0}
+#clawmetryMotionPanel .cm-model-update strong{font-size:13px;font-weight:600;color:#dce6ff}
+#clawmetryMotionPanel .cm-model-update p{margin:4px 0 0;font-size:12px;line-height:1.5;color:#c6d0db;overflow-wrap:anywhere}
+#clawmetryMotionPanel .cm-activity-guide{display:flex;align-items:center;gap:7px;margin:0 0 10px;font-size:11px;color:#aebac1}
+#clawmetryMotionPanel .cm-activity-guide span{padding:4px 8px;border:1px solid #354650;border-radius:20px}
+#clawmetryMotionPanel .cm-recent-events{max-height:340px;overflow-y:auto;overflow-anchor:none;scrollbar-gutter:stable;align-content:start}
+#clawmetryMotionPanel .cm-recent-events li{display:grid;grid-template-columns:1fr auto;justify-self:stretch;max-width:none;width:100%;gap:3px 10px;border-radius:9px;padding:10px 12px}
+#clawmetryMotionPanel .cm-activity-actor{grid-column:1;color:#7ce0c3;font-size:10px;font-weight:600}
+#clawmetryMotionPanel .cm-activity-title{grid-column:1;font-size:13px;line-height:1.5;font-weight:500}
+#clawmetryMotionPanel .cm-activity-detail{grid-column:1/-1;color:#aebac1;font-size:12px;line-height:1.5}
+#clawmetryMotionPanel .cm-activity-detail:empty{display:none}
+#clawmetryMotionPanel .cm-activity-note{font-size:11px;line-height:1.5;color:#aebac1;margin:8px 0 12px}
+#clawmetryMotionPanel .cm-recent-events time{grid-column:2;grid-row:1;font-variant-numeric:tabular-nums;white-space:nowrap}
+#clawmetryMotionPanel .cm-recent-events li[data-category=model] .cm-activity-actor{color:#b7c9f1}
+#clawmetryMotionPanel .cm-recent-events li[data-category=issue]{border-left:2px solid #f2bb72}
+.cm-contact-dialog{box-sizing:border-box;width:min(460px,calc(100vw - 32px));max-height:calc(100dvh - 40px);overflow-y:auto;padding:28px;border:1px solid #3d525b;border-radius:18px;background:#111b21;color:#e9edef;font:14px/1.6 Arial,system-ui,sans-serif;box-shadow:0 24px 80px #0009}
+.cm-contact-dialog::backdrop{background:#050c11b8}
+.cm-contact-dialog h2{font-size:24px;line-height:1.25;letter-spacing:-.5px;margin:8px 24px 12px 0;color:#e9edef}
+.cm-contact-dialog p{color:#aebac1;margin:10px 0 18px}
+.cm-contact-dialog .cm-contact-brand{font-size:12px;font-weight:600;color:#7ce0c3;margin:0}
+.cm-contact-dialog label{display:block;font-size:13px;font-weight:600;margin:16px 0 7px}
+.cm-contact-dialog input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #51616b;border-radius:9px;background:#202c33;color:#e9edef;font:16px Arial,system-ui,sans-serif}
+.cm-contact-dialog .cm-contact-consent{font-size:11px;line-height:1.5;margin:10px 0 18px}
+.cm-contact-dialog button,.cm-contact-booking{min-height:44px;border-radius:9px;font:600 13px/1.4 Arial,system-ui,sans-serif}
+.cm-contact-dialog .cm-contact-close{position:absolute;right:12px;top:12px;width:40px;min-height:40px;padding:0;border:0;background:transparent;color:#aebac1;font-size:25px;cursor:pointer}
+.cm-contact-dialog .cm-contact-submit{width:100%;padding:12px;border:0;background:#7ce0c3;color:#0c2522;cursor:pointer}
+.cm-contact-dialog .cm-contact-submit:disabled{opacity:.6;cursor:wait}
+.cm-contact-dialog .cm-contact-status{font-size:13px;margin-bottom:10px}
+.cm-contact-dialog .cm-contact-status:empty{display:none}
+.cm-contact-dialog .cm-contact-status[data-state=error]{color:#f2bb72}
+.cm-contact-dialog .cm-contact-booking{display:inline-flex;align-items:center;justify-content:center;width:100%;padding:10px;border:1px solid #49675e;color:#9de5d0;text-decoration:none;box-sizing:border-box}
+.cm-contact-dialog [hidden]{display:none!important}
+@media(max-width:1050px){
+  .meetingConsole.clawmetryRoom .meetingRoom .intro{gap:8px}
+  .meetingConsole.clawmetryRoom .meetingRoom .robotNavigation{min-width:0;max-width:100%}
+}
+@media(max-width:900px),(max-height:620px){
+  .meetingConsole.clawmetryRoom .meetingRoom .meetingBar{order:1;position:sticky;top:0;bottom:auto}
+  .meetingConsole.clawmetryRoom .meetingRoom .watchLayout{order:2;scroll-margin-top:70px}
+  .meetingConsole.clawmetryRoom .meetingRoom .meetingPromptDock{order:3;scroll-margin-top:70px}
+  .meetingConsole.clawmetryRoom .meetingRoom{height:auto;min-height:var(--meeting-viewport-height,100dvh)}
+  .meetingConsole.clawmetryRoom .meetingRoom .watchLayout,.meetingConsole.clawmetryRoom .meetingRoom .watchLayout.conversationClosed{width:100%;height:auto!important;min-height:0;flex:1 0 auto}
+  .meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .watchLayout{grid-template-columns:minmax(0,1fr);grid-template-areas:"video" "chat";grid-template-rows:auto auto}
+  .meetingConsole.clawmetryRoom .meetingRoom .watchVisuals{height:auto;grid-template-rows:auto auto auto;align-self:stretch}
+  .meetingConsole.clawmetryRoom .meetingRoom .watchVisuals>.videoPanel{height:auto}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras{height:auto;grid-template-rows:clamp(190px,50vw,440px) 80px}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras[data-meeting-count="1"],.meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras{grid-template-rows:clamp(190px,50vw,440px)}
+  .meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .watchInteraction{height:clamp(320px,52dvh,520px);min-height:320px;display:flex}
+  .meetingConsole.clawmetryRoom .meetingRoom .meetingPromptDock{position:static;inset:auto;width:min(820px,100%);display:block}
+  .meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .cameraStatusLine,.meetingConsole.clawmetryRoom .meetingRoom #yourQueue:not(.meetingQueueEmpty){display:flex}
+}
+@media(max-width:600px){
+  .meetingConsole.clawmetryRoom .meetingRoom .playgroundHeader{align-items:center;gap:7px}
+  .meetingConsole.clawmetryRoom .meetingRoom .intro{flex:1 0 100%;gap:4px 10px}
+  .meetingConsole.clawmetryRoom .cm-room-logo{height:32px}
+  .meetingConsole.clawmetryRoom .cm-room-blupe{font-size:21px}
+  .meetingConsole.clawmetryRoom .meetingRoom .meetingRoomContext{display:inline-flex;font-size:12px;padding-left:10px}
+  .meetingConsole.clawmetryRoom .meetingRoom .robotNavigation{width:100%;margin-left:0}
+  .meetingConsole.clawmetryRoom .meetingRoom .robotNavigation select{max-width:100%;width:100%}
+  .meetingConsole.clawmetryRoom .cm-room-integrate{font-size:12px;min-height:36px;padding:6px 10px}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras{grid-template-rows:calc((100vw - 24px)*.5625) 68px;gap:7px}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras>figure[data-camera-role]:not([data-meeting-main]){display:block}
+  .meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras>figure[data-camera-role]:not([data-meeting-main]){display:none}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras[data-meeting-count="1"],.meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras{grid-template-rows:calc((100vw - 24px)*.5625)}
+  .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras .expandCamera{opacity:1}
+  .meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen .watchInteraction{height:440px;min-height:320px}
+  #clawmetryMotionPanel .cm-recent-events{max-height:240px}
+}

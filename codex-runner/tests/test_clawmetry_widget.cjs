@@ -270,7 +270,7 @@ function browserHarness() {
   dom.interaction.append(dom.visitors, dom.conversation);
   dom.watch.append(dom.modes, dom.interaction);
   dom.history = new Element('section', dom); dom.history.id = 'past-runs'; dom.body.append(dom.watch, dom.history);
-  const window = {listeners: {}, addEventListener(name, fn){this.listeners[name]=fn;}};
+  const window = {listeners: {}, ClawmetryActivity: require('../static/clawmetry-activity.js'), addEventListener(name, fn){this.listeners[name]=fn;}};
   let network = 0, intervals = 0;
   const deferred = [];
   const context = vm.createContext({window, document: dom, console, Object, Number, JSON, Map, Date, Blob, URL, CustomEvent:class {constructor(type,options={}){this.type=type;this.detail=options.detail;}},
@@ -510,7 +510,7 @@ test('move log tab is added beside the upstream modes without editing its markup
   assert.equal(button.dataset.conversationMode, 'clawmetry');
   assert.equal(panel.parent, dom.interaction);
   assert.equal(dom.interaction.children.indexOf(panel), dom.interaction.children.indexOf(dom.conversation) + 1);
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false);
   assert.equal(network(), 0);
 });
 
@@ -617,16 +617,17 @@ test('detailed view link appears only for a server-supplied same-origin trace pa
   }
 });
 
-test('the optional move log preserves the upstream initial tab', () => {
+test('ClawMetry is selected once on mount and status delivery keeps it selected', () => {
   const {dom, window, flush} = browserHarness();
   const button = dom.getElementById('clawmetryMotionTab');
   const panel = dom.getElementById('clawmetryMotionPanel');
-  assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false);
   flush();
   window.yamTelemetry.observe(project(motionState(MOVES)));
-  assert.equal(panel.hidden, true);
-  assert.equal(button['aria-pressed'], 'false');
-  assert.equal(dom.conversation.hidden, false);
+  assert.equal(panel.hidden, false);
+  assert.equal(button['aria-pressed'], 'true');
+  assert.equal(dom.conversation.hidden, true);
+  assert.equal(dom.events.filter(event=>event.type==='yam:conversation-mode').length,1);
 });
 
 test('explicit move log selection opens its pane and polling respects later choices', () => {
@@ -678,7 +679,8 @@ test('completed-run assessment and 200 records share one bounded body without ch
   assert.ok(scroll,'the integration needs one bounded scroll body');
   assert.ok(descendants(scroll).includes(slot));
   assert.ok(descendants(scroll).includes(assessment));
-  assert.equal(dom.getElementById('cm-recent-events').children.length,1);
+  assert.equal(dom.getElementById('cm-recent-events').children.length,2);
+  assert.deepEqual(dom.getElementById('cm-recent-events').children.map(row=>row.dataset.kind),['observation','stopped']);
   assert.equal(dom.getElementById('cm-technical-events').children.length,200);
   for(let i=0;i<3;i++){
     control.textContent='Updated native rating '+i;
@@ -696,6 +698,29 @@ test('completed-run assessment and 200 records share one bounded body without ch
   dom.getElementById('clawmetryMotionTab').click();
   assert.equal(assessment.parent,dom.getElementById('cm-operator-assessment'));
   assert.equal(descendants(dom.body).filter(node=>node.id==='liveAssessment').length,1);
+});
+
+test('unchanged status updates retain readable activity nodes and their scroll position',()=>{
+  const {dom,window}=browserHarness(),raw=motionState(MOVES);
+  window.yamTelemetry.observe(project(raw));
+  const feed=dom.getElementById('cm-recent-events'),first=feed.children[0];feed.scrollTop=17;
+  for(let n=0;n<3;n++)window.yamTelemetry.observe(project(raw));
+  assert.equal(feed.children[0],first);
+  assert.equal(feed.scrollTop,17);
+});
+
+test('shared model errors show a fixed failure label without publishing the source error text',()=>{
+  const raw=state();raw.public_run.model_name='Dream-1 beta';
+  raw.public_run.events=[{id:91,timestamp:105,kind:'model_error',message:'PRIVATE_PROVIDER_ERROR',request:{key:'PRIVATE_KEY'}}];
+  const view=project(raw);
+  assert.equal(view.events.length,1);assert.equal(view.events[0].note,'Model request failed.');
+  assert.equal(JSON.stringify(view).includes('PRIVATE_'),false);
+  const {dom,window}=browserHarness();window.yamTelemetry.observe(view);
+  assert.equal(dom.getElementById('clawmetryMotionPanel').textContent.includes('Dream-1 beta reported an error'),true);
+  raw.telemetry.public_run_shared=false;window.yamTelemetry.observe(project(raw));
+  const summary=descendants(dom.body).find(row=>row.className==='cm-model-update');
+  assert.equal(summary.hidden,true);
+  assert.equal(summary.textContent.includes('Dream-1 beta'),false);
 });
 
 test('reset clears a prior run summary and trust decision without removing the English editor mount',()=>{
@@ -964,6 +989,7 @@ test('task-bound admission state accepts exact typed veto only and stores no raw
 });
 test('verified local veto opens existing review without borrowing previous run or creating history',()=>{
   const {dom,window,network}=browserHarness(),raw=trustedState();
+  dom.listeners['yam:conversation-mode']({detail:{mode:'reasoning'}});
   window.yamTelemetry.observe(project(raw));
   const before=dom.getElementById('cm-technical-events').textContent;
   const send=(name,detail)=>window.listeners[name]({detail});
