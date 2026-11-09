@@ -156,6 +156,24 @@ lease, episode and attempt checks run again afterward and before submission.
 Home/parking remain native and separate. Refusing a future packet does not prove
 physical stopping. Default `None` preserves ordinary dispatch.
 
+Dream's installed-decision path binds each limited packet to the actual raw
+measured pose used by its limiter. A detached, one-use receipt covers the exact
+packet, cursor, capture generation and native run source. The controller checks
+that receipt against the producer and fresh station feedback before Guard and
+again after the callback. A failed capture stream or expired measured baseline
+retires the plan. The call-entry planning timestamp remains separate from the
+packet's measured baseline timestamp and actual camera/tick provenance; none is
+replaced with a later clock.
+
+If a valid measured pose changed before any packet was submitted, Dream can
+discard that exact unsubmitted plan and request a fresh prediction at the same
+cursor, at most twice. This resets model history between predictions and waits
+for newer capture evidence. It does not Home the robot, widen the joint or
+gripper tolerances, retry a Guard refusal, or retry a possibly dispatched move.
+Providers without this receipt seam and ordinary runs without an installed
+decision callback retain their existing behavior. This is bounded replanning,
+not reinforcement learning or proof of physical task success.
+
 Source model/provider identity survives provider cleanup using only bounded
 fields from that run's captured configuration in `status.source_model`. The live
 `status.provider` still becomes null after cleanup. Unknown identity is shown as
@@ -192,3 +210,8 @@ no images, public event or poll; service observation can preserve exact provenan
 This composition is based on Andrew's shared upstream commit `04d8d2768172ee0b1fc290c3b2a3bb25995b18db`. The meeting shell, run library, task cloud, durable native recordings and configurable cadence remain upstream-owned. ClawMetry adds its optional tab through `application-head`; it selects ClawMetry once as the initial Activity tab and extends the existing dark meeting palette with scoped optional CSS. Status still comes from the native fetch, with no additional widget poller. The pre-dispatch callback and private Dream capture receive the actual selected cadence.
 
 The new upstream optional task-cloud stack includes `sentence-transformers`, `umap-learn` and `numba`; these are not required by the optional ClawMetry pane and have not been installed during this local carry-forward. Existing native public-catalog proxy behavior remains unchanged. Live browser acceptance, local Pro attachment and a physical run require separate operator verification. The carry-forward itself commanded no physical run. Subsequent optional room changes retain the same control and sharing contracts.
+
+
+### Current upstream sync
+
+The current fork includes shared upstream `7a008f04f2179c6beea0b6ff462ed89b6f2da956` from `andlyu/blupe-remote-bots`. The new commits change the Hosted Works harness link label and make the browser run-count limit configurable, preserving its default20. Shared task-execution changes through `57bd17c2d85bfa6ae82018fcb805a908c61f7fe1` were already included before this sync. This source update alone is not evidence of improved task success or production configuration parity. Optional ClawMetry defaults, source-qualified activity, contact consent and control/Guard boundaries remain in place.

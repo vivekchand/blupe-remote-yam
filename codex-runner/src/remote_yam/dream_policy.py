@@ -1,5 +1,6 @@
 """Dream-1 YAM chunks through the existing leased Session API controller."""
 import base64
+from copy import deepcopy
 from collections import deque
 import io
 import json
@@ -15,6 +16,8 @@ import uuid
 from .cadence import trajectory_cadence
 from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
 from .latency_spans import journal_span
+from .trajectory_provenance import (make_receipt, measured_baseline, packet_digest,
+                                    source_context, validate_receipt, finite)
 
 MODELS = {'dream': ('dreamlabs/dream-1-beta', 'Dream-1 beta'),
           'dream_flash': ('dreamlabs/dream-1-beta-flash', 'Dream-1 beta Flash')}
@@ -227,6 +230,91 @@ class DreamAdapter:
         self._worker_recoveries = 0
         self._workspace_reset_pending = False
         self._workspace_feedback = None
+        self._plan_context = None
+        self._pending_plan = None
+        self._stale_plan_reset_pending = False
+        self._stale_plan_observed_after = None
+        self._stream_available = True
+
+    def prepare_trajectory_plan(self, context):
+        """Opt in to exact limiter-baseline admission, before an installed check."""
+        checked = source_context(context)
+        if checked['robot_id'] != self.robot_id:
+            raise ValueError('Dream packet source differs from selected robot')
+        with self._changed:
+            self._plan_context = checked
+            self._pending_plan = None
+
+    def consume_trajectory_baseline(self, waypoints, *, first_step_id, context):
+        """One admission receipt; the private packet identity remains discardable."""
+        with self._changed:
+            pending = self._pending_plan
+            if (self._cancelled() or not isinstance(pending, dict) or pending['consumed']
+                    or self._failure is not None or not self._stream_available
+                    or pending['receipt']['generation'] != self._history_generation
+                    or context != self._plan_context or first_step_id != context['first_step_id']):
+                raise RuntimeError('Dream packet baseline is unavailable')
+            now = time.time()
+            validate_receipt(pending['receipt'], waypoints, context, now=now,
+                             planning_observed_at=pending['receipt']['observation']['observed_at'])
+            pending['consumed'] = True
+            pending['last_checked_at'] = now
+            return deepcopy(pending['receipt'])
+
+    def trajectory_baseline_current(self, receipt, waypoints, context):
+        with self._changed:
+            pending = self._pending_plan
+            current = (not self._cancelled() and self._failure is None and self._stream_available
+                    and isinstance(pending, dict) and pending['consumed']
+                    and receipt == pending['receipt'] and context == self._plan_context
+                    and receipt['generation'] == self._history_generation
+                    and packet_digest(waypoints) == receipt['packet_sha256'])
+            if not current:
+                return False
+            now = time.time()
+            if not finite(now) or now < pending['last_checked_at']:
+                return False
+            try:
+                validate_receipt(receipt, waypoints, context, now=now,
+                                 planning_observed_at=receipt['observation']['observed_at'])
+            except (ValueError, TypeError, OverflowError):
+                return False
+            pending['last_checked_at'] = now
+            return True
+
+    def discard_unsubmitted_trajectory(self, waypoints, *, first_step_id, observation, context):
+        """Discard an exact unused prediction; never replay targets or touch Home."""
+        with self._changed:
+            pending = self._pending_plan
+            if (self._cancelled() or not isinstance(pending, dict) or not pending['consumed']
+                    or self._failure is not None or not self._stream_available
+                    or not isinstance(context, dict) or context.get('reason_code') != 'pre_dispatch_pose_changed'
+                    or context.get('dispatched') is not False or type(context.get('executed_waypoints')) is not int
+                    or context['executed_waypoints'] != 0 or type(first_step_id) is not int
+                    or not isinstance(observation, dict) or type(observation.get('step_id')) is not int
+                    or observation['step_id'] != first_step_id
+                    or observation.get('episode_id') != pending['receipt']['source']['episode_id']
+                    or observation.get('lease_id') != pending['receipt']['source']['lease_id']
+                    or source_context({key: context.get(key) for key in pending['receipt']['source']}) != self._plan_context
+                    or first_step_id != self._plan_context['first_step_id']
+                    or pending['receipt']['generation'] != self._history_generation):
+                raise RuntimeError('Dream unsubmitted packet source changed')
+            validate_receipt(pending['receipt'], waypoints, self._plan_context, now=time.time(),
+                             planning_observed_at=pending['receipt']['observation']['observed_at'])
+            baseline = measured_baseline(observation, self.robot_id, now=time.time())
+            if baseline['observed_at'] < pending['receipt']['observation']['observed_at']:
+                raise RuntimeError('Dream unsubmitted packet clock regressed')
+            # In-flight captures belong to the retired generation. A second
+            # invalidation after acknowledged SDK reset requires post-reset input.
+            self._pending_plan = None
+            self._pending_commanded = None
+            self._stale_plan_reset_pending = True
+            self._stale_plan_observed_after = baseline['observed_at']
+            self._history_generation += 1
+            self._history.clear()
+            self._stream_available = False
+            self._changed.notify_all()
+        return True
 
     def _interaction(self, kind, message, **details):
         if self.interaction_sink:
@@ -499,7 +587,23 @@ class DreamAdapter:
                 'source_captured_at_s': frame.source_captured_at,
                 'received_at_s': frame.received_at,
             }
+        # Keep raw encoder degrees separately from encoded model input. This
+        # private copy never replaces camera/model provenance or enters the SDK.
+        raw_baseline = None
+        if self._plan_context is not None:
+            # Collection continues while a previous packet moves. Retain raw
+            # fields now; qualify only the tick actually used for a new packet.
+            raw_baseline = {key: deepcopy(observation[key]) for key in
+                ('jetson_id', 'robot_id', 'source', 'observed_at', 'settled', 'homed', 'mode',
+                 'left_joints_deg', 'right_joints_deg', 'left_gripper', 'right_gripper') if key in observation}
+            safety = observation.get('safety')
+            if isinstance(safety, dict):
+                raw_baseline['safety'] = {key: deepcopy(safety[key]) for key in
+                    ('ok', 'estop_engaged', 'contact_count') if key in safety}
+                if safety.get('active_contacts') not in (None, 0, []):
+                    raw_baseline['safety']['active_contacts'] = 1
         return dict(timestamp=time.monotonic(), observed_at=observed_at, frames=encoded, observation=state,
+                    raw_baseline=raw_baseline,
                     frame_sources=frame_sources,
                     capture_timing=dict(capture_id=capture_id, started_at=capture_started_at,
                         duration_s=time.perf_counter()-capture_started, state_read_s=state_read_s,
@@ -516,7 +620,9 @@ class DreamAdapter:
                 with self._changed:
                     if (generation == self._history_generation and
                             tick['observation']['prompt'] == self._prompt and not self._cancelled()):
+                        tick['capture_generation'] = generation
                         self._history.append(tick)
+                        self._stream_available = True
                         self._changed.notify_all()
                 if unavailable_since is not None and self.interaction_sink:
                     self.interaction_sink('observation_recovered', 'Dream observation feed recovered')
@@ -530,7 +636,10 @@ class DreamAdapter:
                 retrying = error.retryable and time.monotonic() - unavailable_since < OBSERVATION_RECOVERY_S
                 with self._changed:
                     # Never use a prior sample while current feedback is unavailable.
+                    self._history_generation += 1
                     self._history.clear()
+                    self._pending_plan = None
+                    self._stream_available = False
                 if self.interaction_sink and (first_failure or not retrying):
                     self.interaction_sink('observation_retry' if retrying else 'observation_failure',
                         'Dream observation unavailable: ' + str(error),
@@ -549,7 +658,10 @@ class DreamAdapter:
             except Exception as error:
                 if not self._cancelled():
                     with self._changed:
+                        self._history_generation += 1
                         self._history.clear()
+                        self._pending_plan = None
+                        self._stream_available = False
                     self._interaction('observation_failure', 'Dream observation capture failed',
                                       field='observation', cause=type(error).__name__)
                     with self._changed:
@@ -602,6 +714,8 @@ class DreamAdapter:
             with self._changed:
                 self._history_generation += 1
                 self._history.clear()
+                self._pending_plan = None
+                self._stream_available = False
                 self._commanded = self._pending_commanded = None
                 # Compare feedback timestamps only with that same source's
                 # watermark, never order a robot clock against the server clock.
@@ -654,6 +768,8 @@ class DreamAdapter:
     def build_trajectory(self, prompt, observation, first_step_id):
         if self._cancelled():
             raise RuntimeError('Dream cancelled')
+        with self._changed:
+            self._pending_plan = None
         if self._kinematics is not None:
             with journal_span(self.interaction_sink, 'calibration_check', first_step_id=first_step_id):
                 self.configure_robot_workspace(self.robot_id)
@@ -671,6 +787,22 @@ class DreamAdapter:
             self._commanded = self._pending_commanded = None
             self._workspace_reset_pending = False
             self._workspace_feedback = None
+        observed_after = None
+        if self._stale_plan_reset_pending:
+            try:
+                reset = self._worker.call('reset', cancelled=self._cancelled)
+            except BaseException:
+                raise RuntimeError('Dream could not confirm unsubmitted prediction reset') from None
+            if self._cancelled() or not isinstance(reset, dict) or reset.get('ok') is not True:
+                raise RuntimeError('Dream could not confirm unsubmitted prediction reset')
+            with self._changed:
+                self._history_generation += 1
+                self._history.clear()
+                self._stream_available = False
+                self._commanded = self._pending_commanded = None
+                observed_after = math.nextafter(self._stale_plan_observed_after, math.inf)
+                self._stale_plan_reset_pending = False
+                self._stale_plan_observed_after = None
         if self._workspace_reset_pending:
             # SDK 1.0.0 reset_episode clears its action smoother and frame window
             # (docs/refs/dreamlabs/client.md). Run between predictions, never in
@@ -681,6 +813,7 @@ class DreamAdapter:
             with self._changed:
                 self._history_generation += 1
                 self._history.clear()
+                self._stream_available = False
                 self._commanded = self._pending_commanded = None
                 self._workspace_reset_pending = False
             if callable(self.refresh_observation):
@@ -691,13 +824,19 @@ class DreamAdapter:
         began = time.monotonic()
         deadline = began + 600
         session_recoveries = 0
-        observed_after = None
         while True:
             # Require a new camera tick for this decision; never reuse an old snapshot.
             with journal_span(self.interaction_sink, 'observation_wait', first_step_id=first_step_id):
                 ticks = self._wait_for_ticks(began, observed_after)
             if self._cancelled():
                 raise RuntimeError('Dream cancelled')
+            if self._plan_context is not None:
+                with self._changed:
+                    if (self._failure is not None or not self._stream_available
+                            or not ticks or any(tick.get('capture_generation') != self._history_generation for tick in ticks)
+                            or (observed_after is not None and ticks[-1]['observed_at'] < observed_after)):
+                        raise RuntimeError('Dream prediction requires the current fresh capture generation')
+                    prediction_generation = self._history_generation
             update = self.steering.include_prompt(prompt)
             with self._changed:
                 if update is not None:
@@ -761,8 +900,18 @@ class DreamAdapter:
                 baseline = {side+'_joints_deg': [math.degrees(value) for value in measured['state.'+side+'_arm']]
                             for side in ('left', 'right')}
                 baseline.update({side+'_gripper': measured['state.'+side+'_gripper'][0] for side in ('left','right')})
+                if self._plan_context is not None:
+                    baseline = measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
                 points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands,
                                                   cadence_hz=self.trajectory_cadence_hz)
+                if self._plan_context is not None:
+                    with self._changed:
+                        generation = latest.get('capture_generation')
+                        if (generation != self._history_generation or generation != prediction_generation
+                                or self._failure is not None or not self._stream_available or self._cancelled()):
+                            raise RuntimeError('Dream limiter capture generation changed')
+                        receipt = make_receipt(points, latest.get('raw_baseline'), self._plan_context, generation)
+                        self._pending_plan = dict(receipt=receipt, consumed=False)
                 self._observe_evidence('motion_limited_waypoints', points, prediction_context)
                 self._pending_commanded = {
                     key: [math.radians(value) for value in points[-1][side + '_joints_deg']]
@@ -820,10 +969,14 @@ class DreamAdapter:
         # The runner calls this only after gateway completion. Measured lag can
         # resemble an earlier noisy row; the SDK needs the actual final target.
         self._commanded, self._pending_commanded = self._pending_commanded, None
+        self._pending_plan = None
+        self._plan_context = None
 
     def trajectory_adjusted(self, details):
         # Acceptance is not completion: keep the corrected anchor pending until
         # measured completion, and discard the SDK's nominal blending next time.
+        self._pending_plan = None
+        self._plan_context = None
         self._pending_commanded = {
             key: [math.radians(value) for value in details[side + '_joints_deg']]
                  + [details[side + '_gripper']]
@@ -835,6 +988,8 @@ class DreamAdapter:
             + (' Requested orientation was relaxed.' if details.get('orientation_relaxed') else ''))
 
     def trajectory_failed(self, code, message, waypoint_count, *, feedback=None):
+        self._pending_plan = None
+        self._plan_context = None
         self._commanded = self._pending_commanded = None
         self._workspace_reset_pending = True
         boundaries = ', '.join((feedback or {}).get('boundary_limits') or (feedback or {}).get('boundaries') or [code])
@@ -842,6 +997,9 @@ class DreamAdapter:
             'remaining actions were discarded. Use fresh measured state and revise the target; do not replay the packet.')
 
     def close_transport(self):
+        self._stream_available = False
+        self._pending_plan = None
+        self._plan_context = None
         self._stop.set()
         with self._changed:
             self._changed.notify_all()
