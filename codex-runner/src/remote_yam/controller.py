@@ -1307,6 +1307,26 @@ class RunnerController(HomeSceneStartup):
 
         if not still_running():
             return
+        decision_callback = self.trajectory_decision
+        plan_context = dict(plan_id=uuid.uuid4().hex, attempt_id=source_attempt_id, session_id=session_id,
+            episode_id=episode_id, lease_id=lease_id, robot_id=source_robot_id,
+            api_origin=source_api_origin, api_identity=id(source_session_api),
+            first_step_id=first_step_id,
+            cadence_hz=trajectory_cadence(getattr(provider, 'trajectory_cadence_hz', 10)))
+        prepare_baseline = getattr(provider, 'prepare_trajectory_plan', None)
+        consume_baseline = getattr(provider, 'consume_trajectory_baseline', None)
+        check_baseline = getattr(provider, 'trajectory_baseline_current', None)
+        baseline_opt_in = (decision_callback is not None and callable(prepare_baseline)
+                           and observation.get('source') == 'hardware')
+        if baseline_opt_in:
+            if not callable(consume_baseline) or not callable(check_baseline):
+                raise RuntimeError('Installed packet baseline receipt is unavailable; packet refused')
+            try:
+                prepare_baseline(deepcopy(plan_context))
+            except BaseException:
+                raise RuntimeError('Installed packet baseline preparation is unavailable; packet refused') from None
+            if not still_running():
+                return
         if hasattr(provider, "cancelled"):
             provider.cancelled = lambda: not still_running()
         if hasattr(provider, 'refresh_observation'):
@@ -1398,7 +1418,6 @@ class RunnerController(HomeSceneStartup):
                         raise RuntimeError('Home pose changed while planning')
         if not still_running():
             return
-        decision_callback = self.trajectory_decision
         if decision_callback is not None:
             # Freeze provider-owned containers before observation I/O can yield.
             # The callback and transport must inspect the same exact packet.
@@ -1417,6 +1436,45 @@ class RunnerController(HomeSceneStartup):
                 raise RuntimeError("Trajectory waypoint does not match the v1 schema")
             if waypoint.get("step_id") != expected_step:
                 raise RuntimeError("Trajectory waypoint steps must be contiguous")
+        call_entry_observed_at = observation.get('observed_at')
+        packet_baseline_observed_at = None
+        receipt = None
+
+        def baseline_current():
+            if baseline_opt_in:
+                try:
+                    valid = (trajectory_cadence(getattr(provider, 'trajectory_cadence_hz', 10)) == plan_context['cadence_hz']
+                             and check_baseline(deepcopy(receipt), deepcopy(waypoints), deepcopy(plan_context)) is True)
+                except BaseException:
+                    valid = False
+                if not valid:
+                    self._interactions.add('feedback_check', 'Packet baseline was retired; no motion sent',
+                        state='reject', reason_code='packet_baseline_retired', step_id=first_step_id,
+                        dispatched=False, executed_waypoints=0)
+                    raise RuntimeError('Installed packet baseline receipt changed; packet refused')
+        if baseline_opt_in:
+            from .trajectory_provenance import validate_receipt
+            try:
+                receipt = consume_baseline(deepcopy(waypoints), first_step_id=first_step_id,
+                                           context=deepcopy(plan_context))
+                baseline = validate_receipt(receipt, waypoints, plan_context, now=time.time(),
+                                            planning_observed_at=call_entry_observed_at)
+            except BaseException:
+                self._interactions.add('feedback_check', 'Packet baseline could not be verified; no motion sent',
+                    state='reject', reason_code='packet_baseline_invalid', step_id=first_step_id,
+                    dispatched=False, executed_waypoints=0)
+                raise RuntimeError('Installed packet baseline receipt is invalid; packet refused') from None
+            if not still_running():
+                return
+            baseline_current()
+            observation = {**observation, **baseline}
+            packet_baseline_observed_at = baseline['observed_at']
+            self._interactions.add('observation', 'Measured baseline used by this packet limiter',
+                step_id=first_step_id, observed_at=packet_baseline_observed_at,
+                planning_observed_at=call_entry_observed_at, feedback_basis='provider_limiter_baseline',
+                packet_sha256=receipt['packet_sha256'], source='hardware', settled=baseline['settled'],
+                left_joints_deg=list(baseline['left_joints_deg']), right_joints_deg=list(baseline['right_joints_deg']),
+                left_gripper=baseline['left_gripper'], right_gripper=baseline['right_gripper'])
         path_segments = []
         measure = getattr(provider, 'measured_step_displacement', None)
         previous = observation
@@ -1484,6 +1542,7 @@ class RunnerController(HomeSceneStartup):
                 # checks; never rewrite the packet built from the planning pose.
                 if not checked_session():
                     return
+                baseline_current()
                 try:
                     response = source_session_api.get_robot_observation(source_robot_id)
                 except BaseException:
@@ -1499,6 +1558,7 @@ class RunnerController(HomeSceneStartup):
                     raise RuntimeError('Robot changed before installed trajectory decision; packet refused')
                 if not checked_session():
                     return
+                baseline_current()
                 decision, reason = feedback_decision(fresh, fresh, now=time.time(), require_home=first_step_id == 0)
                 if fresh.get('mode') in ('EXECUTING', 'HOMING'):
                     decision, reason = 'reject', 'station_not_explicitly_settled'
@@ -1508,26 +1568,47 @@ class RunnerController(HomeSceneStartup):
                                            trajectory_id=trajectory_id, station=feedback_fields(fresh))
                     raise RuntimeError('Hardware feedback blocked before installed trajectory decision; packet refused')
                 previous_stamp, fresh_stamp = observation.get('observed_at'), fresh.get('observed_at')
-                if (type(previous_stamp) not in (int, float) or not math.isfinite(previous_stamp)
-                        or type(fresh_stamp) not in (int, float) or not math.isfinite(fresh_stamp)
+                from .trajectory_provenance import finite
+                def pose_refusal(reason_code, message, **numbers):
+                    self._interactions.add('feedback_check', 'Packet feedback validation refused; no motion sent',
+                        state='reject', reason_code=reason_code, step_id=first_step_id,
+                        trajectory_id=trajectory_id, dispatched=False, executed_waypoints=0, **numbers)
+                    raise RuntimeError(message)
+                if (not finite(previous_stamp) or not finite(fresh_stamp)
                         or fresh_stamp < previous_stamp):
-                    raise RuntimeError('Feedback clock changed before installed trajectory decision; packet refused')
+                    pose_refusal('planning_feedback_clock_invalid',
+                        'Feedback clock changed before installed trajectory decision; packet refused')
                 pose_changed = False
+                max_joint_delta, max_gripper_delta = 0., 0.
                 for side, count in zip(('left', 'right'), self._joint_counts):
                     before, after = observation.get(side+'_joints_deg'), fresh.get(side+'_joints_deg')
                     if (not isinstance(before, (list, tuple)) or not isinstance(after, (list, tuple))
-                            or len(before) != count or len(after) != count
-                            or any(type(value) not in (int, float) or not math.isfinite(value)
-                                   for value in (*before, *after))):
-                        raise RuntimeError('Joint pose changed before installed trajectory decision; packet refused')
-                    pose_changed |= any(abs(a-b) > .25 for a,b in zip(before, after))
+                            or len(before) != count or len(after) != count):
+                        pose_refusal('planning_joint_shape_invalid',
+                            'Joint pose changed before installed trajectory decision; packet refused')
+                    if not all(finite(value) for value in (*before, *after)):
+                        pose_refusal('planning_joint_nonfinite',
+                            'Joint pose changed before installed trajectory decision; packet refused')
+                    joint_delta = max((abs(a-b) for a,b in zip(before, after)), default=0.)
+                    if not finite(joint_delta):
+                        pose_refusal('planning_joint_nonfinite',
+                            'Joint pose changed before installed trajectory decision; packet refused')
+                    max_joint_delta = max(max_joint_delta, joint_delta)
+                    pose_changed |= joint_delta > .25
                     if count:
                         grips = (observation.get(side+'_gripper'), fresh.get(side+'_gripper'))
-                        if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
-                                for value in grips):
-                            raise RuntimeError('Gripper pose changed before installed trajectory decision; packet refused')
-                        pose_changed |= abs(grips[0]-grips[1]) > .01
+                        if any(not finite(value) or not 0 <= value <= 1 for value in grips):
+                            pose_refusal('planning_gripper_invalid',
+                                'Gripper pose changed before installed trajectory decision; packet refused')
+                        grip_delta = abs(grips[0]-grips[1])
+                        max_gripper_delta = max(max_gripper_delta, grip_delta)
+                        pose_changed |= grip_delta > .01
                 if pose_changed:
+                    self._interactions.add('feedback_check', 'Measured pose changed during planning; no motion sent',
+                        state='reject', reason_code='planning_pose_drift', step_id=first_step_id,
+                        trajectory_id=trajectory_id, dispatched=False, executed_waypoints=0,
+                        max_joint_delta_deg=max_joint_delta, max_gripper_delta=max_gripper_delta,
+                        planning_observed_at=previous_stamp, observed_at=fresh_stamp)
                     # No dispatch/acceptance has occurred. A supported provider
                     # must explicitly resolve and discard this exact pending
                     # tool, then plan anew with fresh images at the SAME cursor.
@@ -1556,8 +1637,7 @@ class RunnerController(HomeSceneStartup):
                     reconcile = getattr(provider, 'refresh_reconciled_observation', None)
                     if callable(reconcile):
                         recovery_observation = reconcile(observation, recovery_observation)
-                    context = dict(robot_id=source_robot_id, session_id=session_id,
-                        episode_id=episode_id, first_step_id=first_step_id,
+                    context = dict(plan_context,
                         reason_code='pre_dispatch_pose_changed', dispatched=False, executed_waypoints=0)
                     if discard(deepcopy(waypoints), first_step_id=first_step_id,
                             observation=deepcopy(recovery_observation), context=context) is not True:
@@ -1583,7 +1663,9 @@ class RunnerController(HomeSceneStartup):
                     'episode_id':episode_id, 'step_id':first_step_id, 'settled_after':fresh_stamp}
                 self._interactions.add('observation', 'Fresh measured feedback before Guard decision',
                     step_id=first_step_id, trajectory_id=trajectory_id, observed_at=fresh_stamp,
-                    planning_observed_at=previous_stamp, feedback_basis='pre_dispatch_authoritative',
+                    planning_observed_at=call_entry_observed_at,
+                    packet_baseline_observed_at=packet_baseline_observed_at,
+                    feedback_basis='pre_dispatch_authoritative',
                     source='hardware', settled=fresh.get('settled'), homed=fresh.get('homed'),
                     left_joints_deg=list(fresh['left_joints_deg']), right_joints_deg=list(fresh['right_joints_deg']),
                     left_gripper=fresh.get('left_gripper'), right_gripper=fresh.get('right_gripper'))
@@ -1594,9 +1676,11 @@ class RunnerController(HomeSceneStartup):
                 trajectory_id=trajectory_id, first_step_id=first_step_id,
                 cadence_hz=cadence_hz)
             if decision_observation is not observation:
-                context.update(planning_observed_at=observation['observed_at'],
+                context.update(planning_observed_at=call_entry_observed_at,
                     decision_feedback_observed_at=decision_observation['observed_at'],
                     decision_feedback_basis='pre_dispatch_authoritative')
+                if packet_baseline_observed_at is not None:
+                    context['packet_baseline_observed_at'] = packet_baseline_observed_at
             observed_at = decision_observation.get('observed_at')
             if type(observed_at) in (int, float) and math.isfinite(observed_at):
                 context['observed_at'] = observed_at
@@ -1609,6 +1693,7 @@ class RunnerController(HomeSceneStartup):
             # A Stop or replacement during a slow callback wins even over allow.
             if not still_running():
                 return
+            baseline_current()
             if not isinstance(decision, dict) or decision.get('decision') not in ('allow', 'reject'):
                 raise RuntimeError('Installed trajectory decision is invalid; packet refused')
             if decision['decision'] != 'allow':

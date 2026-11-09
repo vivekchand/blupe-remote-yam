@@ -1,0 +1,11 @@
+# WO-YAM-UPSTREAM-PARITY-001
+
+Status: in_progress. User requests latest upstream fetch into their fork and production deployment, and reports BluPe production feels more successful at completing tasks.
+
+Requirement: current user message. No connected external requirements/blueprints; local architecture references: codex-runner/docs/clawmetry-widget.md and docs/REPOSITORY-OWNERSHIP.md. Authorization contract: codex-runner/integration-harness/COMPLETION-CHECKLIST.md; source publication/normal deployment are explicitly requested. No new email canary is authorized.
+
+Upstream canonical repository: https://github.com/andlyu/blupe-remote-bots, main5b406fb1ce69f94558acfe788e77b59ab7b358cd. Destination: https://github.com/vivekchand/blupe-remote-yam, current703116bb2726ead344396d48771fb2caf63f2302. Common upstream57bd17c2d85bfa6ae82018fcb805a908c61f7fe1 is already present; one new upstream commit is a two-line Hosted Works label change. User fork has no open PR claims at start. Upstream open PRs are not merged features and are not being taken over.
+
+Deliveries: https://playground.clawmetry.com/ and comparison https://playground.blupe.io/. Prior current deploymentCloud81162422e/revision04003-zaw and native703116/SDK942/Pro66/runtimeDF7 are historical baseline; refresh actual serving state before any mutation. Prior receipt /private/tmp/yam-prominent-ui-final-receipt-20261107.json. Prior CUA failure is a limitation to retry with supported tools, not current proof of availability or failure.
+
+Early source diagnosis and independent design review identify the Dream limiter/call-entry baseline mismatch and missing zero-submit recovery opt-in. Detailed private audit: /private/tmp/yam-upstream-parity-diagnosis.json; existing seam suites155pass. Live current UI shows the generic joint-pose refusal with Dream4.28s prediction and1.86s input capture; exact shape-versus-drift cause remains unproved pending typed source evidence. Plan expanded before implementation with receipt/source/clock/lifecycle and MAX2 replan constraints; no safety threshold relaxation or physical retry.
