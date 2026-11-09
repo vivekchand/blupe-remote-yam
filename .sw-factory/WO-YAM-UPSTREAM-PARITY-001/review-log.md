@@ -96,3 +96,10 @@ No new visible UI redesign is included. Root's actual Safari check of previously
 Independently inspected the corrected architecture text: it now says **call-entry planning timestamp** and explicitly preserves each selected camera/model tick's actual provenance separately. This resolves the only wording advisory. All five final technical source/test hashes above remain unchanged. The exact `7a008f0` Git delta is included in this review as described above, subject to final merged file/tree identity confirmation.
 
 **Final verdict: APPROVED, zero remaining blocking findings or advisories.**
+
+
+### Final merged source identity confirmation
+
+Confirmed merged candidate `a38f109f9082e56bbc59610fdf6453de37808d21` (tree `3a4c00f1a54ac9c942b0a10889daa4491fd04f92`), after the reviewed `8fecdec` merge plus canonical upstream `7a008f04f2179c6beea0b6ff462ed89b6f2da956`. `HEAD^..HEAD` changes **only playground.py**, with five added and two removed lines. Independently compared all added/removed code lines against the actual upstream commit: exact match. All five technical source/test SHA256 values recorded above remain unchanged. The root-updated Current upstream sync paragraph accurately records `7a008f0`, its configurable browser-run count and preserved default20; no physical-success claim.
+
+**APPROVED remains in effect for this merged technical source.** Root's documentation/review-log commit, normal exact-head CI and private provenance publication remain separate subsequent steps.

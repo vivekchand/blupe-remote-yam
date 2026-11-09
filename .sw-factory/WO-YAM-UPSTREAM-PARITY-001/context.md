@@ -1,6 +1,6 @@
 # WO-YAM-UPSTREAM-PARITY-001
 
-Status: in_progress. User requests latest upstream fetch into their fork and production deployment, and reports BluPe production feels more successful at completing tasks.
+Status: in_review (public source component; production delivery pending in private hosting component). User requests latest upstream fetch into their fork and production deployment, and reports BluPe production feels more successful at completing tasks.
 
 Requirement: current user message. No connected external requirements/blueprints; local architecture references: codex-runner/docs/clawmetry-widget.md and docs/REPOSITORY-OWNERSHIP.md. Authorization contract: codex-runner/integration-harness/COMPLETION-CHECKLIST.md; source publication/normal deployment are explicitly requested. No new email canary is authorized.
 
@@ -9,3 +9,5 @@ Upstream canonical repository: https://github.com/andlyu/blupe-remote-bots, main
 Deliveries: https://playground.clawmetry.com/ and comparison https://playground.blupe.io/. Prior current deploymentCloud81162422e/revision04003-zaw and native703116/SDK942/Pro66/runtimeDF7 are historical baseline; refresh actual serving state before any mutation. Prior receipt /private/tmp/yam-prominent-ui-final-receipt-20261107.json. Prior CUA failure is a limitation to retry with supported tools, not current proof of availability or failure.
 
 Early source diagnosis and independent design review identify the Dream limiter/call-entry baseline mismatch and missing zero-submit recovery opt-in. Detailed private audit: /private/tmp/yam-upstream-parity-diagnosis.json; existing seam suites155pass. Live current UI shows the generic joint-pose refusal with Dream4.28s prediction and1.86s input capture; exact shape-versus-drift cause remains unproved pending typed source evidence. Plan expanded before implementation with receipt/source/clock/lifecycle and MAX2 replan constraints; no safety threshold relaxation or physical retry.
+
+Resumed9November: upstream7a008f04f2179c6beea0b6ff462ed89b6f2da956 was merged after5b406 with both parent histories preserved. Independent source review APPROVED; final native suite2092passes/100environment skips/353subtests and Node463passes. Original4TaskCloud dependency failures resolved without source/requirement changes. Production baseline freshly verified unchanged703116/SDK942/Pro66/DF7; candidate release remains pending normal CI and private provenance/deployment.
