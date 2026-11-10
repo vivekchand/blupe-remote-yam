@@ -78,21 +78,22 @@ test('BluPe Claude models are discovered without keys and remembered separately 
   f.input('claude-opus-5-6');f.choose('anthropic');f.choose('guest_claude');
   assert.equal(f.$('model').value,'claude-opus-5-6');
 });
-test('reasoning bar maps Extra High to xhigh and remembers effort per provider and model',async()=>{
+test('Extra High is the default and reset value while manual effort is remembered per provider and model',async()=>{
   const f=fixture(async(_path,payload)=>({source:'provider',models:payload.provider==='codex'
     ? [{id:'gpt-6.1-sol',label:'GPT-6.1 Sol',reasoning_efforts:['low','medium','high','xhigh','max'],default_reasoning_effort:'medium'}]
     : [{id:'claude-opus-5-5',label:'Claude Opus 5.5',reasoning_efforts:['low','medium','high','xhigh','max'],default_reasoning_effort:'medium'}]}));
   f.choose('codex');await tick();f.input('gpt-6.1-sol');
-  assert.equal(f.$('reasoningEffort').value,'medium');
-  f.$('reasoningLevel').value='3';f.$('reasoningLevel').listeners.input();
   assert.equal(f.$('reasoningEffort').value,'xhigh');
   assert.equal(f.$('reasoningLabel').textContent,'Extra High');
   assert.equal(f.$('reasoningModel').textContent,'GPT-6.1 Sol');
-  f.choose('claude');await tick();assert.equal(f.$('reasoningEffort').value,'medium');
-  f.choose('codex');assert.equal(f.$('reasoningEffort').value,'xhigh');
-  f.input('gpt-6-astra');assert.equal(f.$('reasoningEffort').value,'low');
-  f.input('gpt-6.1-sol');assert.equal(f.$('reasoningEffort').value,'xhigh');
-  f.$('resetReasoning').listeners.click();assert.equal(f.$('reasoningEffort').value,'medium');
+  assert.equal(f.storage.has('blupe-effort:codex:gpt-6-astra'),false);
+  f.$('reasoningLevel').value='1';f.$('reasoningLevel').listeners.input();
+  assert.equal(f.$('reasoningEffort').value,'medium');
+  f.choose('claude');await tick();assert.equal(f.$('reasoningEffort').value,'xhigh');
+  f.choose('codex');assert.equal(f.$('reasoningEffort').value,'medium');
+  f.input('gpt-6-astra');assert.equal(f.$('reasoningEffort').value,'xhigh');
+  f.input('gpt-6.1-sol');assert.equal(f.$('reasoningEffort').value,'medium');
+  f.$('resetReasoning').listeners.click();assert.equal(f.$('reasoningEffort').value,'xhigh');
 });
 test('sponsored Astra keeps its model fixed while discovering supported effort levels',async()=>{
   const calls=[];const f=fixture(async(path,payload)=>{calls.push(payload);return {source:'codex_subscription',
@@ -101,7 +102,6 @@ test('sponsored Astra keeps its model fixed while discovering supported effort l
   assert.equal(f.$('modelSettings').hidden,true);assert.equal(f.$('reasoningBar').hidden,false);
   assert.deepEqual(calls,[{provider:'guest_astra'}]);
   assert.equal(f.$('reasoningLevel').max,'1');
-  f.$('reasoningLevel').value='1';f.$('reasoningLevel').listeners.input();
   assert.equal(f.$('reasoningEffort').value,'xhigh');
 });
 
@@ -111,16 +111,28 @@ test('Haiku suggestions and discovered future versions retain the subscription p
     {id:'claude-opus-5-5',label:'Opus 5.5'},
     {id:'claude-haiku-5-5',label:'Haiku 5.5',reasoning_efforts:['low','medium','high','xhigh','max'],default_reasoning_effort:'medium'},
     {id:'claude-haiku-6',label:'Haiku 6'}]}));
-  assert.deepEqual(f.picker.modelsFor('guest_claude').map(row=>row.id),['claude-opus-5-5','claude-haiku-5-5']);
+  assert.deepEqual(f.picker.modelsFor('guest_claude').map(row=>row.id),['claude-opus-5-5','claude-haiku-5-5','claude-fable-5-2']);
   assert.deepEqual(f.picker.modelsFor('groot'),[]);
   f.choose('guest_claude');await tick();
   assert.deepEqual(f.picker.modelsFor('guest_claude').map(row=>row.id),['claude-opus-5-5','claude-haiku-5-5','claude-haiku-6']);
   f.picker.selectModel('claude-haiku-5-5');
   assert.equal(f.$('provider').value,'guest_claude');
   assert.equal(f.$('model').value,'claude-haiku-5-5');
-  f.$('resetReasoning').listeners.click();assert.equal(f.$('reasoningEffort').value,'medium');
-  f.$('reasoningLevel').value='3';f.$('reasoningLevel').listeners.input();assert.equal(f.$('reasoningEffort').value,'xhigh');
+  f.$('resetReasoning').listeners.click();assert.equal(f.$('reasoningEffort').value,'xhigh');
+  f.$('reasoningLevel').value='1';f.$('reasoningLevel').listeners.input();assert.equal(f.$('reasoningEffort').value,'medium');
   f.choose('codex');f.choose('guest_claude');
   assert.equal(f.$('model').value,'claude-haiku-5-5');
+  assert.equal(f.$('reasoningEffort').value,'medium');
+});
+
+test('Fable 5.2 keeps the exact selected model across catalog refresh',async()=>{
+  const id='claude-fable-5-2';
+  const f=fixture(async()=>({source:'claude_subscription',models:[{id,label:'Claude Fable 5.2'}]}));
+  f.choose('guest_claude');
+  assert.equal(f.$('model').value,'claude-opus-5-5');
+  f.picker.selectModel(id);
+  await tick();
+  assert.equal(f.$('model').value,id);
+  assert.equal(f.$('availableModels').children[0].value,id);
   assert.equal(f.$('reasoningEffort').value,'xhigh');
 });

@@ -16,8 +16,8 @@
     function modelsFor(name) {
       if (!defaults[name]) return [];
       return catalogs.get(name)?.models || [defaults[name],
-        ...(['anthropic','claude','guest_claude'].includes(name) ? ['claude-haiku-5-5'] : ['gpt-6.1-terra'])]
-        .map(id => ({id,label:id}));
+        ...(['anthropic','claude','guest_claude'].includes(name) ? ['claude-haiku-5-5','claude-fable-5-2'] : ['gpt-6.1-terra'])]
+        .map(id => ({id,label:id === 'claude-fable-5-2' ? 'Claude Fable 5.2' : id}));
     }
     function saveSelection() {
       if (!provider || fixed) return;
@@ -52,17 +52,17 @@
       const field = $('reasoningEffort'), previous = field.value;
       const identity = effortKey();
       let saved; try { saved = storage?.getItem(identity); } catch (_) {}
-      defaultEffort = entry?.default_reasoning_effort || (['claude','guest_claude'].includes(provider) ? 'medium' : provider === 'guest_astra' ? 'high' : efforts[0]);
-      if (!efforts.includes(defaultEffort)) defaultEffort = efforts[0];
+      const fallbackDefault = ['claude','guest_claude'].includes(provider) ? 'medium' : provider === 'guest_astra' ? 'high' : efforts[0];
+      defaultEffort = ['xhigh', entry?.default_reasoning_effort, fallbackDefault].find(effort => efforts.includes(effort)) || efforts[0];
       field.replaceChildren(...efforts.map(effort => nodeOption(effort, labels[effort])));
-      field.value = efforts.includes(saved) ? saved : effortIdentity === identity && efforts.includes(previous) ? previous : provider.startsWith('guest_') && efforts.includes('high') ? 'high' : defaultEffort;
+      field.value = efforts.includes(saved) ? saved : effortIdentity === identity && efforts.includes(previous) ? previous : defaultEffort;
       effortIdentity = identity;
       renderEffort();
     }
     function renderCatalog() {
       const catalog = catalogs.get(provider);
       $('availableModels').replaceChildren(...modelsFor(provider).map(model => nodeOption(model.id, model.label)));
-      $('modelCatalogStatus').textContent = catalog?.message || 'Choose Astra or GPT 6.1+, or Claude Opus or Haiku 5.5+. Enter a model ID or refresh the list.';
+      $('modelCatalogStatus').textContent = catalog?.message || 'Choose a model or enter its exact ID. Refresh to see the models available from your provider.';
       applyEffort();
       changed();
     }
@@ -110,7 +110,7 @@
     }
     function selectModel(value) {
       $('model').value = value;
-      saveEffort(); saveSelection(); applyEffort(); changed();
+      saveSelection(); applyEffort(); changed();
     }
     $('model').addEventListener('input', () => selectModel($('model').value));
     $('reasoningEffort').addEventListener('change', () => { saveEffort(); renderEffort(); });
@@ -121,7 +121,7 @@
     $('resetReasoning')?.addEventListener('click', () => { $('reasoningEffort').value = defaultEffort; saveEffort(); renderEffort(); });
     $('refreshModels').addEventListener('click', () => { void refresh(true); });
     $('apiKey').addEventListener('change', () => { void refresh(true); });
-    return {saveSelection:() => { saveEffort(); saveSelection(); }, providerChanged, refresh, reset, modelsFor, selectModel};
+    return {saveSelection, providerChanged, refresh, reset, modelsFor, selectModel};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = {createModelPicker};
   else root.createBlupeModelPicker = createModelPicker;
