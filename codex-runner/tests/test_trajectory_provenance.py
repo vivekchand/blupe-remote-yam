@@ -6,6 +6,17 @@ import pytest
 from remote_yam.trajectory_provenance import make_receipt, validate_receipt, packet_digest, measured_baseline
 
 
+def test_only_otherwise_safe_expired_samples_are_recoverable(provenance):
+    from remote_yam.trajectory_provenance import ExpiredMeasuredBaseline
+    _, observation, _, now = provenance
+    with pytest.raises(ExpiredMeasuredBaseline):measured_baseline(observation, 'yam-1', now=now+6)
+    for change in ({'mode':'FAULT'}, {'safety':{'ok':False,'estop_engaged':False}},
+                   {'safety':{'ok':True,'estop_engaged':True}}, {'left_gripper':True}):
+        with pytest.raises(ValueError) as error:
+            measured_baseline(dict(observation, **change), 'yam-1', now=now+6)
+        assert not isinstance(error.value, ExpiredMeasuredBaseline)
+
+
 @pytest.fixture
 def provenance():
     now=time.time()

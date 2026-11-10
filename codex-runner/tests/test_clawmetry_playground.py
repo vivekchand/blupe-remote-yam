@@ -696,6 +696,7 @@ def test_prequeue_admission_retains_public_activity_journal_identity_and_episode
         assert not app.social_database.exists()
         code, state, _, _ = call(app, '/api/status', session=browser)
         assert code == 200 and state['public_run']['status'] == 'preparing'
+        assert state['public_run']['preparation_before_queue'] is True
         run_id = state['public_run']['run_id']
         assert run_id and state['public_run']['runner_name'] == 'Actual fixture person'
         assert 'private-fixture@example.test' not in json.dumps(state['public_run'])
@@ -723,6 +724,7 @@ def test_prequeue_admission_retains_public_activity_journal_identity_and_episode
         assert code == 200 and state['public_run']['run_id'] == run_id
         assert state['public_run']['runner_name'] == 'Actual fixture person'
         assert state['public_run']['episode_id'] == 'ep_inert_hosted_prequeue'
+        assert 'preparation_before_queue' not in state['public_run']
         app.run_assessments.assess('ep_inert_hosted_prequeue', 'Failure', 0, visitor.assessment_session)
         assessment = app.run_assessments.detail('ep_inert_hosted_prequeue', visitor.assessment_session)
         assert assessment['label'] == 'Failure'
