@@ -1537,72 +1537,90 @@ class RunnerController(HomeSceneStartup):
                         raise RuntimeError('Session changed before installed trajectory decision; packet refused')
                     return True
 
-                # A monitor sample alone cannot establish lease/cursor identity.
-                # Sandwich a fresh station read between authoritative session
-                # checks; never rewrite the packet built from the planning pose.
-                if not checked_session():
-                    return
-                baseline_current()
-                try:
-                    response = source_session_api.get_robot_observation(source_robot_id)
-                except BaseException:
+                def checked_station():
+                    # A monitor sample alone cannot establish lease/cursor identity.
+                    # Sandwich a fresh station read between authoritative session
+                    # checks; never rewrite the packet built from the planning pose.
+                    if not checked_session():
+                        return None
+                    baseline_current()
+                    try:
+                        response = source_session_api.get_robot_observation(source_robot_id)
+                    except BaseException:
+                        if not still_running():
+                            return None
+                        raise RuntimeError('Installed trajectory decision feedback is unavailable; packet refused') from None
                     if not still_running():
-                        return
-                    raise RuntimeError('Installed trajectory decision feedback is unavailable; packet refused') from None
-                if not still_running():
+                        return None
+                    fresh = (response.get('observation') or response.get('payload') or response) if isinstance(response, Mapping) else None
+                    if (not isinstance(fresh, Mapping) or fresh.get('jetson_id') != source_robot_id
+                            or fresh.get('robot_id', source_robot_id) != source_robot_id
+                            or fresh.get('source') != 'hardware'):
+                        raise RuntimeError('Robot changed before installed trajectory decision; packet refused')
+                    if not checked_session():
+                        return None
+                    baseline_current()
+                    decision, reason = feedback_decision(fresh, fresh, now=time.time(), require_home=first_step_id == 0)
+                    if fresh.get('mode') in ('EXECUTING', 'HOMING'):
+                        decision, reason = 'reject', 'station_not_explicitly_settled'
+                    if decision != 'ready':
+                        self._interactions.add('feedback_check', 'Hardware feedback blocked before Guard decision',
+                                               state=decision, reason_code=reason, step_id=first_step_id,
+                                               trajectory_id=trajectory_id, station=feedback_fields(fresh))
+                        raise RuntimeError('Hardware feedback blocked before installed trajectory decision; packet refused')
+                    return fresh
+                fresh = checked_station()
+                if fresh is None:
                     return
-                fresh = (response.get('observation') or response.get('payload') or response) if isinstance(response, Mapping) else None
-                if (not isinstance(fresh, Mapping) or fresh.get('jetson_id') != source_robot_id
-                        or fresh.get('robot_id', source_robot_id) != source_robot_id
-                        or fresh.get('source') != 'hardware'):
-                    raise RuntimeError('Robot changed before installed trajectory decision; packet refused')
-                if not checked_session():
-                    return
-                baseline_current()
-                decision, reason = feedback_decision(fresh, fresh, now=time.time(), require_home=first_step_id == 0)
-                if fresh.get('mode') in ('EXECUTING', 'HOMING'):
-                    decision, reason = 'reject', 'station_not_explicitly_settled'
-                if decision != 'ready':
-                    self._interactions.add('feedback_check', 'Hardware feedback blocked before Guard decision',
-                                           state=decision, reason_code=reason, step_id=first_step_id,
-                                           trajectory_id=trajectory_id, station=feedback_fields(fresh))
-                    raise RuntimeError('Hardware feedback blocked before installed trajectory decision; packet refused')
-                previous_stamp, fresh_stamp = observation.get('observed_at'), fresh.get('observed_at')
                 from .trajectory_provenance import finite
                 def pose_refusal(reason_code, message, **numbers):
                     self._interactions.add('feedback_check', 'Packet feedback validation refused; no motion sent',
                         state='reject', reason_code=reason_code, step_id=first_step_id,
                         trajectory_id=trajectory_id, dispatched=False, executed_waypoints=0, **numbers)
                     raise RuntimeError(message)
-                if (not finite(previous_stamp) or not finite(fresh_stamp)
-                        or fresh_stamp < previous_stamp):
-                    pose_refusal('planning_feedback_clock_invalid',
-                        'Feedback clock changed before installed trajectory decision; packet refused')
-                pose_changed = False
-                max_joint_delta, max_gripper_delta = 0., 0.
-                for side, count in zip(('left', 'right'), self._joint_counts):
-                    before, after = observation.get(side+'_joints_deg'), fresh.get(side+'_joints_deg')
-                    if (not isinstance(before, (list, tuple)) or not isinstance(after, (list, tuple))
-                            or len(before) != count or len(after) != count):
-                        pose_refusal('planning_joint_shape_invalid',
-                            'Joint pose changed before installed trajectory decision; packet refused')
-                    if not all(finite(value) for value in (*before, *after)):
-                        pose_refusal('planning_joint_nonfinite',
-                            'Joint pose changed before installed trajectory decision; packet refused')
-                    joint_delta = max((abs(a-b) for a,b in zip(before, after)), default=0.)
-                    if not finite(joint_delta):
-                        pose_refusal('planning_joint_nonfinite',
-                            'Joint pose changed before installed trajectory decision; packet refused')
-                    max_joint_delta = max(max_joint_delta, joint_delta)
-                    pose_changed |= joint_delta > .25
-                    if count:
-                        grips = (observation.get(side+'_gripper'), fresh.get(side+'_gripper'))
-                        if any(not finite(value) or not 0 <= value <= 1 for value in grips):
-                            pose_refusal('planning_gripper_invalid',
-                                'Gripper pose changed before installed trajectory decision; packet refused')
-                        grip_delta = abs(grips[0]-grips[1])
-                        max_gripper_delta = max(max_gripper_delta, grip_delta)
-                        pose_changed |= grip_delta > .01
+                def pose_difference(fresh):
+                    previous_stamp, fresh_stamp = observation.get('observed_at'), fresh.get('observed_at')
+                    if (not finite(previous_stamp) or not finite(fresh_stamp)
+                            or fresh_stamp < previous_stamp):
+                        pose_refusal('planning_feedback_clock_invalid',
+                            'Feedback clock changed before installed trajectory decision; packet refused')
+                    pose_changed = False
+                    max_joint_delta, max_gripper_delta = 0., 0.
+                    for side, count in zip(('left', 'right'), self._joint_counts):
+                        before, after = observation.get(side+'_joints_deg'), fresh.get(side+'_joints_deg')
+                        if (not isinstance(before, (list, tuple)) or not isinstance(after, (list, tuple))
+                                or len(before) != count or len(after) != count):
+                            pose_refusal('planning_joint_shape_invalid',
+                                'Joint pose changed before installed trajectory decision; packet refused')
+                        if not all(finite(value) for value in (*before, *after)):
+                            pose_refusal('planning_joint_nonfinite',
+                                'Joint pose changed before installed trajectory decision; packet refused')
+                        joint_delta = max((abs(a-b) for a,b in zip(before, after)), default=0.)
+                        if not finite(joint_delta):
+                            pose_refusal('planning_joint_nonfinite',
+                                'Joint pose changed before installed trajectory decision; packet refused')
+                        max_joint_delta = max(max_joint_delta, joint_delta)
+                        pose_changed |= joint_delta > .25
+                        if count:
+                            grips = (observation.get(side+'_gripper'), fresh.get(side+'_gripper'))
+                            if any(not finite(value) or not 0 <= value <= 1 for value in grips):
+                                pose_refusal('planning_gripper_invalid',
+                                    'Gripper pose changed before installed trajectory decision; packet refused')
+                            grip_delta = abs(grips[0]-grips[1])
+                            max_gripper_delta = max(max_gripper_delta, grip_delta)
+                            pose_changed |= grip_delta > .01
+                    if baseline_opt_in:
+                        from .trajectory_provenance import measured_baseline
+                        try:
+                            measured_baseline(fresh, source_robot_id, now=time.time())
+                        except (ValueError, TypeError, OverflowError):
+                            self._interactions.add('feedback_check', 'Fresh packet feedback is unavailable; no motion sent',
+                                state='reject', reason_code='packet_feedback_invalid_or_stale', step_id=first_step_id,
+                                trajectory_id=trajectory_id, dispatched=False, executed_waypoints=0)
+                            raise RuntimeError('Installed packet baseline receipt has no fresh hardware feedback; packet refused') from None
+                    return pose_changed, max_joint_delta, max_gripper_delta
+                pose_changed, max_joint_delta, max_gripper_delta = pose_difference(fresh)
+                previous_stamp, fresh_stamp = observation.get('observed_at'), fresh.get('observed_at')
                 if pose_changed:
                     self._interactions.add('feedback_check', 'Measured pose changed during planning; no motion sent',
                         state='reject', reason_code='planning_pose_drift', step_id=first_step_id,
@@ -1698,6 +1716,24 @@ class RunnerController(HomeSceneStartup):
                 raise RuntimeError('Installed trajectory decision is invalid; packet refused')
             if decision['decision'] != 'allow':
                 raise RuntimeError('Installed trajectory decision refused this packet')
+            if baseline_opt_in:
+                # Guard and local evidence capture may take longer than the
+                # original sample's age limit. Re-read the authoritative source;
+                # never retimestamp the limiter receipt or replay changed targets.
+                final_feedback = checked_station()
+                if final_feedback is None:
+                    return
+                if final_feedback['observed_at'] < decision_observation['observed_at']:
+                    pose_refusal('post_decision_feedback_clock_invalid',
+                        'Feedback clock changed after installed trajectory decision; packet refused')
+                changed, joint_delta, gripper_delta = pose_difference(final_feedback)
+                if changed:
+                    pose_refusal('post_decision_pose_drift',
+                        'Robot pose changed after installed trajectory decision; packet refused',
+                        max_joint_delta_deg=joint_delta, max_gripper_delta=gripper_delta)
+                self.update_monitor_observation(final_feedback)
+                if not still_running():
+                    return
         with self._lock:
             if not still_running():
                 return

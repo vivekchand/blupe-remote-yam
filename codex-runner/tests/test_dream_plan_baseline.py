@@ -386,3 +386,135 @@ def test_baseline_age_and_finite_wall_clock_rechecked_after_async_work(tmp_path,
     with pytest.raises(RuntimeError,match='baseline receipt'):dispatch()
     assert not api.submitted and controller._trajectory is None
     assert [command for command,_ in provider._worker.calls]==['predict']
+
+
+@pytest.mark.parametrize('delay_stage', ['planning_metrics', 'station', 'guard'])
+def test_fresh_unchanged_station_can_revalidate_historical_limiter_pose(tmp_path, monkeypatch, delay_stage):
+    """Local admission latency must not expire an otherwise unchanged plan."""
+    decisions = []
+    clock = [time.time()]
+    def guard(*args):
+        decisions.append(copy.deepcopy(args))
+        if delay_stage == 'guard':
+            clock[0] += 6.
+        return {'decision': 'allow'}
+    api, controller, provider, planning, dispatch = dream_case(tmp_path, guard)
+    clock[0] = api.stamp
+    monkeypatch.setattr(time, 'time', lambda: clock[0])
+    # Match the continuously published hardware feed, without changing its pose.
+    def fresh_station(api, kind, index):
+        if delay_stage == 'station' and len(api.calls) == 1:
+            clock[0] += 6.
+        api.fresh['observed_at'] = clock[0]
+    api.hook = fresh_station
+    if delay_stage == 'planning_metrics':
+        def slow_metric(before, after):
+            clock[0] += .3
+            return 0.
+        provider.measured_step_displacement = slow_metric
+    dispatch()
+    assert len(api.submitted) == len(decisions) == 1
+    # Provenance retains the actual limiter capture, not a substituted clock.
+    assert provider._pending_plan['receipt']['observation']['observed_at'] == api.stamp
+    assert controller._trajectory['start_feedback']['left_joints_deg'] == provider._pending_plan['receipt']['observation']['left_joints_deg']
+    assert api.calls[-2:] == ['robot', 'session']
+    assert [name for name, _ in provider._worker.calls] == ['predict']
+
+
+@pytest.mark.parametrize('field,bad', [
+    ('jetson_id', 'other-robot'), ('source', 'simulation'), ('settled', False),
+    ('mode', 'EXECUTING'), ('mode', 'HOMING'), ('mode', 'DISABLED'), ('mode', 'FAULT'),
+    ('left_joints_deg', [.651] + [0.] * 5), ('right_joints_deg', [.251] + [0.] * 5),
+    ('left_joints_deg', [0.] * 5), ('left_joints_deg', [True] * 6),
+    ('right_joints_deg', [float('nan')] * 6),
+    ('left_gripper', .98), ('right_gripper', None), ('left_gripper', True),
+    ('observed_at', 0.), ('observed_at', True),
+    ('safety', dict(ok=False, estop_engaged=False)),
+    ('safety', dict(ok=True, estop_engaged=True)),
+    ('safety', dict(ok=True, estop_engaged=False, contact_count=1)),
+])
+def test_changed_or_unsafe_feedback_after_guard_never_dispatches(tmp_path, field, bad):
+    holder = {}
+    def guard(*args):
+        holder['api'].fresh[field] = bad
+        return {'decision': 'allow'}
+    api, controller, provider, _, dispatch = dream_case(tmp_path, guard)
+    holder['api'] = api
+    with pytest.raises(RuntimeError, match='packet refused'):
+        dispatch()
+    assert not api.submitted and controller._trajectory is None
+    assert [name for name, _ in provider._worker.calls] == ['predict']
+
+
+@pytest.mark.parametrize('field,bad', [
+    ('session_id', 'foreign'), ('episode_id', 'foreign'), ('lease_id', 'foreign'),
+    ('latest_observation_step', 43), ('active_trajectory', {}), ('status', 'stopped'),
+])
+@pytest.mark.parametrize('read_number', [3, 4])
+def test_session_must_still_match_around_post_guard_station_read(tmp_path, field, bad, read_number):
+    api, controller, provider, _, dispatch = dream_case(tmp_path)
+    def replace(api, kind, index):
+        if kind == 'session' and index == read_number:
+            api.live[field] = bad
+    api.hook = replace
+    with pytest.raises(RuntimeError, match='Session changed'):
+        dispatch()
+    assert not api.submitted and controller._trajectory is None
+
+
+@pytest.mark.parametrize('during', ['robot', 'last_session'])
+def test_stop_during_post_guard_feedback_prevents_submission(tmp_path, during):
+    api, controller, provider, _, dispatch = dream_case(tmp_path)
+    def stop(api, kind, index):
+        if ((during == 'robot' and kind == 'robot' and api.calls.count('robot') == 2)
+                or (during == 'last_session' and kind == 'session' and index == 4)):
+            controller._stop_event.set()
+    api.hook = stop
+    dispatch()
+    assert not api.submitted and controller._trajectory is None
+
+
+def test_station_clock_must_not_regress_after_guard_even_if_newer_than_limiter(tmp_path, monkeypatch):
+    clock = [time.time()]
+    api, controller, provider, _, dispatch = dream_case(tmp_path)
+    clock[0] = api.stamp + 2.
+    monkeypatch.setattr(time, 'time', lambda: clock[0])
+    def stamps(api, kind, index):
+        if kind == 'robot':
+            api.fresh['observed_at'] = api.stamp + (1. if api.calls.count('robot') == 1 else .5)
+    api.hook = stamps
+    with pytest.raises(RuntimeError, match='Feedback clock changed after'):
+        dispatch()
+    assert not api.submitted and controller._trajectory is None
+
+
+def test_delayed_feedback_with_real_drift_still_requires_a_new_prediction(tmp_path, monkeypatch):
+    api, controller, provider, _, dispatch = dream_case(tmp_path)
+    clock = [api.stamp]
+    monkeypatch.setattr(time, 'time', lambda: clock[0])
+    def drift_once(api, kind, index):
+        if kind == 'robot' and api.calls.count('robot') == 1:
+            clock[0] += 6.
+            api.fresh['observed_at'] = clock[0]
+            api.fresh['left_joints_deg'][0] += .4
+    api.hook = drift_once
+    dispatch()
+    assert len(api.submitted) == 1
+    assert [name for name, _ in provider._worker.calls] == ['predict', 'reset', 'predict']
+    assert controller._trajectory['start_feedback']['left_joints_deg'][0] == .8
+
+
+def test_monitor_admission_retains_native_dream_targets(tmp_path):
+    from remote_yam.trajectory_provenance import packet_digest
+    digests = []
+    for name, callback in [('native', None), ('monitored', lambda *args: {'decision': 'allow'})]:
+        api, controller, provider, planning, _ = dream_case(tmp_path / name, callback)
+        prompt = 'place the red block on grey plate'
+        provider._prompt = provider._task_prompt = prompt
+        controller._dispatch_trajectory(provider.build_trajectory, provider,
+            prompt, planning, 'guard-session', 'guard-episode', 'PRIVATE-LEASE', 42)
+        assert len(api.submitted) == 1
+        prediction = provider._worker.calls[0][1]
+        assert prediction['ticks'][-1]['observation']['prompt'] == prompt
+        digests.append(packet_digest(api.submitted[0]))
+    assert digests[0] == digests[1]
