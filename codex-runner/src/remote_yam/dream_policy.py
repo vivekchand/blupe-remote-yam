@@ -687,6 +687,8 @@ class DreamAdapter:
                     raise RuntimeError('Dream cancelled')
                 if limiter_generation is not None and self._history_generation != limiter_generation:
                     raise RuntimeError('Dream limiter capture generation changed')
+                if limiter_generation is not None and time.monotonic() >= deadline:
+                    raise RuntimeError('Dream limiter requires fresh settled hardware feedback; packet refused')
                 ticks = [tick for tick in self._history
                          if observed_after is None or tick['observed_at'] >= observed_after]
                 if (ticks and time.time() - ticks[-1]['observed_at'] <= 5
@@ -709,8 +711,6 @@ class DreamAdapter:
                                                   progress_type='status')
                             return ticks
                 if limiter_generation is not None:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError('Dream limiter requires fresh settled hardware feedback; packet refused')
                     if not waiting:
                         waiting = True
                         self._interaction('model_progress', 'Dream waiting for settled hardware feedback before motion',

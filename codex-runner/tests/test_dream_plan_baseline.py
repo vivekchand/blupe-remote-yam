@@ -139,6 +139,20 @@ def test_malformed_or_unsafe_moving_sample_is_not_treated_as_a_settling_wait(tmp
     assert not api.submitted and not provider._worker.calls
 
 
+def test_settled_tick_cannot_be_admitted_after_the_limiter_wait_deadline(tmp_path, monkeypatch):
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, _, _ = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    tick=provider._capture_tick();tick['capture_generation']=0
+    provider._history.append(tick)
+    clock=iter((0.,6.))
+    monkeypatch.setattr(time,'monotonic',lambda:next(clock))
+    with pytest.raises(RuntimeError,match='fresh settled'):
+        provider._wait_for_ticks(None,api.stamp,0)
+    assert not api.submitted
+
+
 def test_real_dream_packet_uses_its_actual_limiter_baseline_not_call_entry(tmp_path):
     decisions = []
     api, controller, provider, planning, dispatch = dream_case(tmp_path,
