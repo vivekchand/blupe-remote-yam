@@ -14,7 +14,37 @@ const $ = id => elements[id] ||= {hidden:false,textContent:'',classes:new Set(),
   }},
   closest(selector){assert.equal(selector,'.queuePlace');return $('queuePlace');},
   focus(){this.focusCount++;},scrollIntoView(options){this.scrolls.push(options);}};
-const context = vm.createContext({$,window:{matchMedia:()=>({matches:true})}});
+let selectedMode = null;
+const modeButtons = {};
+for (const mode of ['reasoning', 'conversation', 'visitor', 'hide', 'clawmetry']) {
+  modeButtons[mode] = {dataset:{conversationMode:mode}, clicks:0,
+    getAttribute(name) { assert.equal(name,'aria-controls'); return mode === 'clawmetry' ? 'clawmetryMotionPanel'
+      : mode === 'visitor' ? 'visitorChatPanel' : 'liveConversationPanel'; },
+    click() { this.clicks++; selectedMode = mode; }};
+}
+const document = {
+  querySelector(selector) {
+    if (selector === '[data-conversation-mode][aria-pressed="true"]') return modeButtons[selectedMode] || null;
+    return modeButtons[/data-conversation-mode="([^"]+)"/.exec(selector)?.[1]] || null;
+  },
+  getElementById:$,
+};
+const context = vm.createContext({$,document,window:{matchMedia:()=>({matches:true})}});
+const openStart = source.indexOf('  function openConversationPanel()');
+vm.runInContext(source.slice(openStart,source.indexOf('  let setupProvider = null;',openStart)),context);
+// Run must preserve the user's selected Activity tab, including optional tabs
+// mounted after the shared UI. An explicitly hidden panel still reopens notes.
+for (const mode of ['clawmetry','conversation','visitor','reasoning']) {
+  selectedMode = mode;
+  context.openConversationPanel();
+  assert.equal(selectedMode,mode);
+  assert.equal(modeButtons[mode].clicks,1);
+}
+for (const mode of ['hide',null]) {
+  selectedMode = mode;
+  context.openConversationPanel();
+  assert.equal(selectedMode,'reasoning');
+}
 vm.runInContext(source.slice(start,end),context);
 const render = state => context.guideRunAttention(state);
 render({status:'queued',session_id:'mine',queue_position:3});
@@ -91,4 +121,16 @@ assert.equal($('liveConversationPanel').classes.has('yourTaskReview'),false);
 const scrolls=$('liveViewer').scrolls.length;
 render({status:'running',session_id:'fixture-session',provider:{task_progress:{task:'Fixture'}}});
 assert.equal($('liveViewer').scrolls.length,scrolls);
+// With ClawMetry selected, prompt review focuses the visible evidence panel,
+// never the hidden native notes panel. Queue/start polls keep that selection.
+selectedMode = 'clawmetry';
+$('liveConversationPanel').hidden = true;
+const previousFocus = $('liveConversationPanel').focusCount;
+render({status:'preparing',new_submission:true});
+assert.equal(selectedMode,'clawmetry');
+assert.equal($('clawmetryMotionPanel').focusCount,1);
+assert.equal($('liveConversationPanel').focusCount,previousFocus);
+render({status:'queued',session_id:'next',queue_position:1});
+render({status:'running',session_id:'next'});
+assert.equal(selectedMode,'clawmetry');
 console.log('Queue handoff checks passed');

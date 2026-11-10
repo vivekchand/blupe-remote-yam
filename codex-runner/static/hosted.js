@@ -1171,7 +1171,15 @@ function createRunLaunchGuard() {
   $('runAstra').onclick = () => runWithProvider('codex', 'Run with Astra');
   $('runClaude').onclick = () => runWithProvider('claude', 'Run with Opus');
   function openConversationPanel() {
-    document.querySelector('[data-conversation-mode="reasoning"]')?.click();
+    const selected = document.querySelector('[data-conversation-mode][aria-pressed="true"]');
+    const button = selected && selected.dataset.conversationMode !== 'hide' ? selected
+      : document.querySelector('[data-conversation-mode="reasoning"]');
+    button?.click();
+  }
+  function activityReviewPanel() {
+    const selected = document.querySelector('[data-conversation-mode][aria-pressed="true"]');
+    const panel = document.getElementById(selected?.getAttribute('aria-controls'));
+    return panel && !panel.hidden ? panel : $('liveConversationPanel');
   }
   let setupProvider = null;
   let shownSubscriptionFailure = '';
@@ -1442,7 +1450,7 @@ function createRunLaunchGuard() {
       requested_duration_s:Number($('runDuration').value)*60,status:'preparing',events:[],reviewing_prompt:true};
     launchVersion = runLaunchGuard.start(provisional);
     submitting = true;buttons();
-    // Every actual submit switches the complete view before hooks or I/O.
+    // Open the selected Activity view before hooks or I/O.
     $('localRunDialog').close();$('subscriptionHelp').close();
     $('publicRunError').hidden = true;$('publicRunError').textContent = '';
     renderCurrentConversation(provisional,{});
@@ -1610,7 +1618,7 @@ function createRunLaunchGuard() {
       : live ? (taskProgress ? 'Your run is active — watch the highlighted viewer.' : 'Your run is live — watch the highlighted viewer.')
       : 'Join the queue to reserve your turn.';
     if (changed && (reviewing || live)) {
-      const target = $(reviewing ? 'liveConversationPanel' : 'liveViewer');
+      const target = reviewing ? activityReviewPanel() : $('liveViewer');
       // Guide once per transition; polling must never pull someone away from reading.
       if (taskProgress || state.new_submission || live || !['queued', 'preparing'].includes(attentionPhase)) {
         target.focus({preventScroll: true});
