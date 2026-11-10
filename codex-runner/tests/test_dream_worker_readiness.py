@@ -102,3 +102,25 @@ def test_adapter_requires_explicit_complete_readiness_receipt(tmp_path,receipt):
         assert instances[0].calls[0][1]['fully_prepare'] is True
         assert [c for c,_ in instances[0].calls]==['configure']
     finally:provider.close_transport()
+
+
+@pytest.mark.parametrize('stop_at_receipt',[False,True])
+def test_stopped_or_closed_worker_cannot_retain_readiness(tmp_path,stop_at_receipt):
+    provider=adapter(tmp_path)
+    class ReceiptWorker(Worker):
+        def call(self,command,**kwargs):
+            reply=super().call(command,**kwargs)
+            if command=='configure' and stop_at_receipt:provider._stop.set()
+            return reply
+    provider.worker_factory=ReceiptWorker
+    try:
+        provider.start_preparation(lambda:False)
+        if stop_at_receipt:
+            with pytest.raises(RuntimeError,match='cancelled'):provider.wait_ready(lambda:False)
+        else:
+            provider.wait_ready(lambda:False)
+            assert provider._ready.is_set()
+        provider.close_transport();provider._preparation.join(3)
+        assert not provider._ready.is_set() and provider._worker.closed.is_set()
+        assert [c for c,_ in provider._worker.calls]==['configure']
+    finally:provider.close_transport()

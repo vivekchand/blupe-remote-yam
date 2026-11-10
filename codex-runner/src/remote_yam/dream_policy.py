@@ -465,7 +465,10 @@ class DreamAdapter:
                 if self._kinematics is not None and (reply.get('result') or {}).get('kinematic_calibration') != self._kinematics['binding']:
                     self._failure = 'Dream worker did not confirm the selected calibration; no prediction will run'
                     return
-                self._ready.set()
+                with self._transport_lock:
+                    if self._cancelled():
+                        return
+                    self._ready.set()
             except Exception as error:
                 self._failure = 'Dream SDK setup failed (' + type(error).__name__ + ')'
             finally:
@@ -1061,6 +1064,7 @@ class DreamAdapter:
 
     def _close_worker(self):
         with self._transport_lock:
+            self._ready.clear()
             if self._worker:
                 self._worker.close()
             if self._worker_slot:
