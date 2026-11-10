@@ -835,6 +835,9 @@ body.cameraExpanded{overflow:hidden}
 .playgroundConsole .expandCamera:hover::before,.playgroundConsole .expandCamera:focus-visible::before{background:#14271df2}
 .playgroundConsole #liveViewer[data-layout="top-with-grippers"]>figure[data-camera-role="top"] .expandCamera{top:0}
 .playgroundConsole .cameraDialog .syncTile>figcaption{display:none}
+.playgroundConsole .cameraDialog .syncTile[data-camera-unavailable]>figcaption,
+.playgroundConsole #liveViewer figure[data-camera-unavailable]>figcaption{display:flex}
+.playgroundConsole #liveViewer figure[data-camera-unavailable]>figcaption span[data-sync-status]{display:inline}
 
 .playgroundConsole .cameraDialog .expandCamera{display:none}
 
