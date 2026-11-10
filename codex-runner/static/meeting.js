@@ -284,7 +284,10 @@
 
   function updateCameras() {
     const figures = [...$('liveViewer').querySelectorAll('figure[data-camera-role]')];
-    const main = figures.find(node => node.dataset.cameraRole === 'observer') || figures.find(node => node.dataset.cameraRole === 'top') || figures[0];
+    const available = figures.filter(node => !node.hasAttribute('data-camera-unavailable'));
+    const main = available.find(node => node.dataset.cameraRole === 'observer')
+      || available.find(node => node.dataset.cameraRole === 'top') || available[0]
+      || figures.find(node => node.dataset.cameraRole === 'top') || figures[0];
     for (const figure of figures) figure.toggleAttribute('data-meeting-main', figure === main);
     $('liveViewer').style.setProperty('--meeting-side-count', Math.max(1, figures.length - 1));
     $('liveViewer').dataset.meetingCount = String(figures.length);
@@ -293,7 +296,7 @@
   new MutationObserver(updateCameras).observe($('liveViewer'), {childList:true});
   // The startup preview assigns roles to existing figures before live video starts.
   new MutationObserver(updateCameras).observe($('liveViewer'), {
-    subtree: true, attributes: true, attributeFilter: ['data-camera-role']
+    subtree: true, attributes: true, attributeFilter: ['data-camera-role', 'data-camera-unavailable']
   });
   function viewport() {
     const height = Math.min(window.innerHeight, window.visualViewport?.height || window.innerHeight);

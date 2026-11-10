@@ -2358,11 +2358,40 @@ function createRunLaunchGuard() {
     atlas.width = 1280; atlas.height = 720;
     const context = atlas.getContext('2d', {alpha:false});
     const contexts = tiles.map(tile => tile.getContext('2d', {alpha:false}));
+    const figures = tiles.map(tile => tile.closest('figure'));
+    const sample = document.createElement('canvas');
+    const sampleSize = 8;
+    sample.width = sampleSize * tiles.length; sample.height = sampleSize;
+    const sampler = sample.getContext('2d', {willReadFrequently:true});
     const labels = [...document.querySelectorAll('[data-sync-status]')];
     const stopExpanding = cameraExpansion(video, tiles);
     let callback, lastMediaTime = -1, lastPaint = -Infinity, stopped = false, frame = 0;
     const stopSnapshots = [], startupStarted = performance.now();
     const latency = document.querySelector?.('#streamLatency'), latencySamples = [];
+    function blankTiles(rects) {
+      if (!sampler) return [];
+      try {
+        // Exclude the compositor's timestamp strip and frame edges. One small
+        // readback checks all crops before we overwrite their last usable image.
+        rects.forEach(([x,y,w,h], i) => {
+          sampler.drawImage(atlas, x+w/16, y+h/16, w*7/8, h*7/8,
+            i*sampleSize, 0, sampleSize, sampleSize);
+        });
+        const pixels = sampler.getImageData(0, 0, sample.width, sample.height).data;
+        return rects.map((_, i) => {
+          for (let row = 0; row < sampleSize; row++) {
+            for (let column = 0; column < sampleSize; column++) {
+              const offset = (row * sample.width + i * sampleSize + column) * 4;
+              if (Math.max(pixels[offset], pixels[offset+1], pixels[offset+2]) > 12) return false;
+            }
+          }
+          return true;
+        });
+      } catch {
+        // Some browsers forbid pixel reads. Keep their normal playback path.
+        return [];
+      }
+    }
     function measureLatency(hd) {
       if (!latency || !hd || typeof context.getImageData !== 'function') return;
       try {
@@ -2396,7 +2425,7 @@ function createRunLaunchGuard() {
     function loadSnapshots() {
       tiles.forEach((tile, i) => {
         const role = tile.dataset.cameraRole;
-        if (!role || !cameraNames.includes(role)) return;
+        if (!role || !cameraNames.includes(role) || tile.dataset.frameSource === 'video') return;
         const snapshot = new Image();
         let pending = true;
         const stop = () => {
@@ -2405,12 +2434,13 @@ function createRunLaunchGuard() {
           snapshot.removeAttribute('src');
         };
         const timer = setTimeout(stop, 5000);
-        stopSnapshots.push(stop);
+        stopSnapshots[i] = stop;
         snapshot.onerror = stop;
         snapshot.onload = async () => {
           try {
             await snapshot.decode();
-            if (!pending || stopped || frame || document.hidden || selectedRobot !== snapshotRobot) return;
+            if (!pending || stopped || tile.dataset.frameSource === 'video'
+                || document.hidden || selectedRobot !== snapshotRobot) return;
             const width = snapshot.naturalWidth || 640, height = snapshot.naturalHeight || 360;
             tile.width = width; tile.height = height;
             contexts[i].drawImage(snapshot, 0, 0, width, height);
@@ -2442,17 +2472,26 @@ function createRunLaunchGuard() {
         context.drawImage(video, 0, 0, width, height);
         measureLatency(hd);
         frame++;
-        if (frame === 1) stopSnapshots.forEach(stop => stop());
-        tiles.forEach((tile, i) => {
+        const rects = tiles.map((tile, i) => {
           const role = tile.dataset.cameraRole;
-          const rect = hd ? ({observer:[0,0,1920,1080],left:[1920,0,640,360],top:[1920,360,640,360],right:[1920,720,640,360]})[role]
+          return hd ? ({observer:[0,0,1920,1080],left:[1920,0,640,360],top:[1920,360,640,360],right:[1920,720,640,360]})[role]
             : [(i%2)*width/2, Math.floor(i/2)*height/2, width/2, height/2];
+        });
+        const blank = blankTiles(rects);
+        tiles.forEach((tile, i) => {
+          const unavailable = blank[i] === true;
+          figures[i].toggleAttribute('data-camera-unavailable', unavailable);
+          if (unavailable) return;
+          const rect = rects[i];
+          stopSnapshots[i]?.();
+          delete stopSnapshots[i];
+          const firstFrame = !tile.dataset.presentedFrame;
           if (tile.width !== rect[2]) tile.width = rect[2];
           if (tile.height !== rect[3]) tile.height = rect[3];
           contexts[i].drawImage(atlas, ...rect, 0, 0, rect[2], rect[3]);
           tile.dataset.presentedFrame = String(frame);
           tile.dataset.frameSource = 'video';
-          if (frame === 1) tile.dataset.firstVideoFrameMs = String(Math.round(performance.now() - startupStarted));
+          if (firstFrame) tile.dataset.firstVideoFrameMs = String(Math.round(performance.now() - startupStarted));
         });
         lastMediaTime = video.currentTime;
         // Carry the fractional refresh interval forward instead of rounding
@@ -2461,7 +2500,10 @@ function createRunLaunchGuard() {
       }
       labels.forEach((label, i) => {
         const status = stale ? 'Stream stalled' : sourceLabel.textContent;
-        label.textContent = ['snapshot','preview'].includes(tiles[i]?.dataset.frameSource) ? 'Still image · ' + status : status;
+        const source = tiles[i]?.dataset.frameSource;
+        label.textContent = figures[i]?.hasAttribute('data-camera-unavailable')
+          ? (source ? 'Last image' : 'Video unavailable')
+          : ['snapshot','preview'].includes(source) ? 'Still image · ' + status : status;
       });
       if (latency && stale) latency.hidden = true;
       callback = requestAnimationFrame(paint);
@@ -2474,7 +2516,7 @@ function createRunLaunchGuard() {
     };
     window.addEventListener('pagehide', video.yamStopPainting);
     paint();
-    if (!frame) loadSnapshots();
+    if (tiles.some(tile => tile.dataset.frameSource !== 'video')) loadSnapshots();
   }
   function camera(image) {
     const label = image.parentElement.querySelector('figcaption span');

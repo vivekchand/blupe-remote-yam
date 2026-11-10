@@ -31,6 +31,7 @@
 .meetingConsole .meetingRoom #liveViewer.cameras canvas,.meetingConsole .meetingRoom #liveViewer.cameras .modelCameraPicture img { width:100%; height:100%; max-height:none; aspect-ratio:auto; transform:none; object-fit:contain; }
 .meetingConsole .meetingRoom #liveViewer.cameras>figure>figcaption { position:absolute; display:flex; align-items:center; gap:8px; left:10px; bottom:10px; max-width:calc(100% - 20px); padding:5px 9px; border-radius:6px; background:#202124ed; color:#f1f3f4; font-size:12px; text-transform:capitalize; pointer-events:none; }
 .meetingConsole .meetingRoom #liveViewer.cameras figcaption span { color:#bdc1c6; font-size:10px; }
+.meetingConsole .meetingRoom #liveViewer.cameras figure[data-camera-unavailable] figcaption [data-sync-status] { display:inline; }
 .meetingConsole .meetingRoom #liveViewer.cameras .expandCamera { display:block; opacity:0; right:8px; top:8px; bottom:auto; width:32px; height:32px; background:#202124e8; color:#fff; }
 .meetingConsole .meetingRoom #liveViewer.cameras figure:hover .expandCamera,.meetingConsole .meetingRoom #liveViewer.cameras figure:focus-within .expandCamera { opacity:1; }
 .meetingConsole .meetingRoom .liveStopwatch { top:12px; left:calc((100% - 200px)/2); border:0; border-radius:6px; background:#202124ed; padding:7px 10px; }

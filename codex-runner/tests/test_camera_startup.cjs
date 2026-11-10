@@ -5,12 +5,21 @@ const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(process.env.YAM_TEST_HOSTED_JS || path.join(__dirname, '../static/hosted.js'), 'utf8');
 const panels = source.slice(source.indexOf('  function synchronizedPanels('), source.indexOf('  function camera(image)'));
+const meeting = fs.readFileSync(path.join(__dirname, '../static/meeting.js'), 'utf8');
+const cameraSelection = meeting.slice(meeting.indexOf('  function updateCameras()'), meeting.indexOf('  new MutationObserver(updateCameras)'));
 
-function harness({ready = false, hd = false, marker = null, roles = ['top','observer','left','right'], snapshots = roles} = {}) {
+function harness({ready = false, hd = false, marker = null, roles = ['top','observer','left','right'], snapshots = roles, blank = []} = {}) {
   const draws = [], images = [], timers = new Map(), labels = [];
   let callback, id = 0, now = 0;
-  const tiles = roles.map(role => ({
+  const blankRoles = new Set(blank);
+  const figures = roles.map(role => {
+    const attributes = new Set();
+    return {dataset:{cameraRole:role}, hasAttribute:name => attributes.has(name),
+      toggleAttribute(name, enabled) { if (enabled) attributes.add(name); else attributes.delete(name); }};
+  });
+  const tiles = roles.map((role, i) => ({
     dataset: {cameraRole: role}, addEventListener() {},
+    closest: () => figures[i],
     getContext: () => ({drawImage: (...args) => draws.push({role, args})}),
   }));
   tiles.forEach(() => labels.push({textContent: ''}));
@@ -27,6 +36,19 @@ function harness({ready = false, hd = false, marker = null, roles = ['top','obse
       return {data};
     },
   })};
+  const probe = {getContext: () => ({
+    drawImage() {},
+    getImageData(x,y,w,h) {
+      const data = new Uint8ClampedArray(w*h*4);
+      for (let row = 0; row < h; row++) {
+        roles.forEach((role, i) => {
+          if (!blankRoles.has(role)) data.fill(80, (row*w+i*8)*4, (row*w+i*8+8)*4);
+        });
+      }
+      return {data};
+    },
+  })};
+  const viewer = {dataset:{}, style:{setProperty() {}}, querySelectorAll:() => figures};
   const context = {
     performance: {now: () => now},
     cameraExpansion: () => () => {},
@@ -41,14 +63,19 @@ function harness({ready = false, hd = false, marker = null, roles = ['top','obse
     },
     window: {addEventListener() {}, removeEventListener() {}},
     document: {
-      hidden: false, createElement: () => atlas,
+      hidden: false, createElement: () => id++ === 0 ? atlas : probe,
       querySelector: selector => selector === '#streamLatency' ? latency : null,
       querySelectorAll: selector => selector === 'canvas[data-sync-tile]' ? tiles
         : selector === '[data-sync-status]' ? labels : [],
     },
   };
   vm.runInNewContext(panels + '\nsynchronizedPanels(video, label);', context);
-  return {context, video, atlas, tiles, labels, images, draws, timers, latency, paint(elapsed = 125) {now += elapsed; callback?.(now);}};
+  return {context, video, atlas, tiles, labels, images, draws, timers, latency, blankRoles,
+    paint(elapsed = 125) {now += elapsed; callback?.(now);},
+    mainCamera() {
+      vm.runInNewContext(cameraSelection + '\nupdateCameras();', {$:() => viewer, views:{}});
+      return figures.find(figure => figure.hasAttribute('data-meeting-main'))?.dataset.cameraRole;
+    }};
 }
 
 test('real snapshots fill the panels before video connects and remain clearly labeled', async () => {
@@ -122,6 +149,33 @@ test('a late snapshot cannot overwrite synchronized video', async () => {
   assert(h.tiles.every(tile => tile.dataset.frameSource === 'video'));
   assert(h.images.every(image => image.removed));
   assert.equal(h.timers.size, 0);
+});
+
+test('a blank Observer cannot overwrite its last image or displace a live top view', () => {
+  const h = harness({ready:true, hd:true});
+  assert.equal(h.mainCamera(), 'observer');
+  h.blankRoles.add('observer');
+  h.video.paused = false; h.video.currentTime = .2; h.paint();
+  assert.equal(h.mainCamera(), 'top');
+  assert.equal(h.tiles[1].dataset.presentedFrame, '1');
+  assert.equal(h.labels[1].textContent, 'Last image');
+  assert.equal(h.tiles[0].dataset.presentedFrame, '2');
+  h.blankRoles.clear();
+  h.video.currentTime = .4; h.paint();
+  assert.equal(h.mainCamera(), 'observer');
+  assert.equal(h.tiles[1].dataset.presentedFrame, '3');
+});
+
+test('blank video at startup leaves the existing still-image requests available', async () => {
+  const h = harness({ready:true, blank:['top','observer','left','right'], snapshots:['top','left','right']});
+  assert.equal(h.images.length, 3);
+  assert(h.tiles.every(tile => !tile.dataset.frameSource));
+  assert.equal(h.mainCamera(), 'top');
+  assert.equal(h.labels[0].textContent, 'Video unavailable');
+  await h.images[0].onload();
+  h.paint();
+  assert.equal(h.tiles[0].dataset.frameSource, 'snapshot');
+  assert.equal(h.labels[0].textContent, 'Last image');
 });
 
 test('snapshot errors and timeout do not block live video', () => {
