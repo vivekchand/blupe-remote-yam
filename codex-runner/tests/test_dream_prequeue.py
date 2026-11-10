@@ -107,7 +107,8 @@ def test_failed_or_incomplete_preparation_never_joins_queue(tmp_path, result):
         cleanup(controller, policy, release)
 
 
-@pytest.mark.parametrize('failure', ['queue', 'calibration', 'events', 'stop_during_events', 'disconnect_during_events'])
+@pytest.mark.parametrize('failure', ['queue', 'calibration', 'events', 'stop_during_events', 'disconnect_during_events',
+    'stop_during_calibration', 'disconnect_during_calibration', 'replacement_during_calibration'])
 def test_admission_failure_after_preparation_cleans_only_its_owned_session(tmp_path, failure):
     class API(MockSessionAPI):
         def create_session(self, *args, **kwargs):
@@ -130,9 +131,19 @@ def test_admission_failure_after_preparation_cleans_only_its_owned_session(tmp_p
             def changed(*args):
                 raise ValueError('Synthetic calibration changed')
             policy.configure_robot_workspace = changed
+        if failure.endswith('_during_calibration'):
+            def cancelled(*args):
+                if failure == 'replacement_during_calibration':
+                    controller._provider = adapter(tmp_path/'replacement')
+                    controller._status = 'idle'
+                else:
+                    getattr(controller, 'stop' if failure == 'stop_during_calibration' else 'disconnect')()
+            policy.configure_robot_workspace = cancelled
         release.set()
         wait_for(lambda: not controller._worker.is_alive())
-        expected = {'stop_during_events':'stopped', 'disconnect_during_events':'disconnected'}.get(failure, 'failed')
+        expected = {'stop_during_events':'stopped', 'disconnect_during_events':'disconnected',
+            'stop_during_calibration':'stopped', 'disconnect_during_calibration':'disconnected',
+            'replacement_during_calibration':'idle'}.get(failure, 'failed')
         assert controller.status()['status'] == expected
         wait_for(worker.closed.is_set)
         assert policy.worker_pool.acquire(blocking=False)

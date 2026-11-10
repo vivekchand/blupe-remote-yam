@@ -160,6 +160,9 @@ class RunnerController(HomeSceneStartup):
         # native deadline validator. Shorter runs retain the existing wire shape.
         if run_duration_s > 600 and getattr(provider, 'provider_name', None) in ('dream', 'dream_flash'):
             duration_options['provider'] = provider.provider_name
+        with self._lock:
+            if prepared and (self._stop_event.is_set() or self._provider is not provider):
+                raise RuntimeError('Run preparation cancelled before queue admission')
         created = self._session_api.create_session(prompt, **duration_options)
         session_id = str(created["session_id"])
         if prepared and (self._stop_event.is_set() or self._provider is not provider):
