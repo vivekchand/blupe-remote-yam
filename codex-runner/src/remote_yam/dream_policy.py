@@ -258,7 +258,7 @@ class DreamAdapter:
             validate_receipt(pending['receipt'], waypoints, context, now=now,
                              planning_observed_at=pending['receipt']['observation']['observed_at'])
             pending['consumed'] = True
-            pending['last_checked_at'] = now
+            pending['admitted_at'] = pending['last_checked_at'] = now
             return deepcopy(pending['receipt'])
 
     def trajectory_baseline_current(self, receipt, waypoints, context):
@@ -275,7 +275,10 @@ class DreamAdapter:
             if not finite(now) or now < pending['last_checked_at']:
                 return False
             try:
-                validate_receipt(receipt, waypoints, context, now=now,
+                # The receipt records a historical limiter input. Fresh hardware
+                # feedback is checked against that immutable pose by the controller
+                # before and after Guard; admission latency cannot age its identity.
+                validate_receipt(receipt, waypoints, context, now=pending['admitted_at'],
                                  planning_observed_at=receipt['observation']['observed_at'])
             except (ValueError, TypeError, OverflowError):
                 return False
@@ -299,9 +302,12 @@ class DreamAdapter:
                     or first_step_id != self._plan_context['first_step_id']
                     or pending['receipt']['generation'] != self._history_generation):
                 raise RuntimeError('Dream unsubmitted packet source changed')
-            validate_receipt(pending['receipt'], waypoints, self._plan_context, now=time.time(),
+            now = time.time()
+            if not finite(now) or now < pending['last_checked_at']:
+                raise RuntimeError('Dream unsubmitted packet clock regressed')
+            validate_receipt(pending['receipt'], waypoints, self._plan_context, now=pending['admitted_at'],
                              planning_observed_at=pending['receipt']['observation']['observed_at'])
-            baseline = measured_baseline(observation, self.robot_id, now=time.time())
+            baseline = measured_baseline(observation, self.robot_id, now=now)
             if baseline['observed_at'] < pending['receipt']['observation']['observed_at']:
                 raise RuntimeError('Dream unsubmitted packet clock regressed')
             # In-flight captures belong to the retired generation. A second

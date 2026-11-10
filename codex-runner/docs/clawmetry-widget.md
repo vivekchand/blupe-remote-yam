@@ -160,8 +160,12 @@ Dream's installed-decision path binds each limited packet to the actual raw
 measured pose used by its limiter. A detached, one-use receipt covers the exact
 packet, cursor, capture generation and native run source. The controller checks
 that receipt against the producer and fresh station feedback before Guard and
-again after the callback. A failed capture stream or expired measured baseline
-retires the plan. The call-entry planning timestamp remains separate from the
+again after the callback. A failed capture stream retires the plan. The initial limiter baseline must be
+fresh at receipt admission. Later checks preserve that historical receipt and
+require fresh authoritative hardware feedback at the same pose, both before and
+after Guard. A stale current feed, changed lease/cursor, unsafe station or pose
+drift after Guard refuses the packet. Local admission latency alone does not
+retimestamp or retire an unchanged limiter pose. The call-entry planning timestamp remains separate from the
 packet's measured baseline timestamp and actual camera/tick provenance; none is
 replaced with a later clock.
 
@@ -215,3 +219,30 @@ The new upstream optional task-cloud stack includes `sentence-transformers`, `um
 ### Current upstream sync
 
 The current fork includes shared upstream `7a008f04f2179c6beea0b6ff462ed89b6f2da956` from `andlyu/blupe-remote-bots`. The new commits change the Hosted Works harness link label and make the browser run-count limit configurable, preserving its default20. Shared task-execution changes through `57bd17c2d85bfa6ae82018fcb805a908c61f7fe1` were already included before this sync. This source update alone is not evidence of improved task success or production configuration parity. Optional ClawMetry defaults, source-qualified activity, contact consent and control/Guard boundaries remain in place.
+
+
+### Dream admission latency regression
+
+The fork's receipt path used the original limiter observation's five-second
+age gate again after planning metrics, station reads and Guard. This could stop
+an unchanged plan with `Installed packet baseline receipt changed; packet refused`,
+even while the hardware published fresh settled feedback. The upstream native
+path has no installed-decision receipt check.
+
+Receipt admission still requires a fresh, qualified limiter capture. Subsequent
+integrity checks retain its exact packet/source/generation and original clock.
+Fresh hardware feedback is independently qualified against the same five-second
+age limit and existing 0.25 degree / 0.01 gripper tolerances before Guard and again
+after an allow result. The latter station read is bracketed by authoritative
+session checks. A refusal, unavailable feed or changed source sends no packet.
+If pose drift is found before Guard, existing bounded discard/reset/re-predict
+recovery can use fresh feedback even if admission work aged the historical input.
+The adapter never substitutes the new clock into the original receipt.
+
+Local regression fixtures exercise delays in planning metrics, station reads and
+Guard, plus post-Guard pose/safety/source failures. They use inert model results
+and station feedback and do not establish success on a physical pick-and-place
+task. Hosted acceptance must separately run `place the red block on grey plate`
+with the same robot, Dream checkpoint and duration on both playgrounds, preserving
+run IDs, starting-scene evidence and recordings. That physical comparison remains
+unverified by these source tests.
