@@ -188,7 +188,10 @@ class DreamAdapter:
 
     def __init__(self, *, provider, model, credentials, python, directory,
                  camera_source, observation_source, robot_id, worker_factory=DreamWorker,
-                 gateway_max_step_deg=None, worker_pool=None, calibration_source=None, run_context=None, evidence_observer=None):
+                 gateway_max_step_deg=None, worker_pool=None, calibration_source=None, run_context=None, evidence_observer=None,
+                 prepare_before_queue=False):
+        if type(prepare_before_queue) is not bool:
+            raise ValueError('Dream preparation mode must be true or false')
         if provider not in MODELS or model != MODELS[provider][0]:
             raise ValueError('Unknown Dream checkpoint')
         self.provider_name, self.model = provider, model
@@ -216,6 +219,10 @@ class DreamAdapter:
         self._history = deque(maxlen=9)
         self._worker = None
         self._preparation = None
+        self._configure_timeout = 180
+        self._prepare_before_queue = prepare_before_queue
+        if prepare_before_queue:
+            self.prepare_before_session = self._prepare_before_session
         self._collector = None
         self._failure = None
         self._prompt = None
@@ -378,6 +385,7 @@ class DreamAdapter:
                     max_joint_step_deg=self.max_joint_step_deg,
                     effective_joint_step_deg=self.effective_joint_step_deg,
                     gateway_profile_step_deg=self.gateway_max_step_deg,
+                    **({'preparation_before_queue': True} if self._prepare_before_queue else {}),
                     **({'kinematic_calibration': json.loads(json.dumps(self._kinematics['binding'])),
                         'model_calibration_id':self._kinematics['binding']['model_calibration_id'],
                         'calibration_id':self._kinematics['binding']['camera_calibration_id']}
@@ -385,6 +393,31 @@ class DreamAdapter:
 
     def _cancelled(self):
         return self._stop.is_set() or self.cancelled()
+
+    def _prepare_before_session(self, prompt):
+        """Compile synthetic IK before requesting a lease or starting its clock."""
+        deadline = time.monotonic() + 600
+        try:
+            if self._cancelled():
+                raise RuntimeError('Dream preparation cancelled')
+            self._interaction('model_progress',
+                'Preparing Dream trajectory solvers before joining the robot queue; the run timer has not started',
+                progress_type='status')
+            self.configure_robot_workspace(self.robot_id)
+            # Cold CPU compilation can exceed the shorter leased-setup budget.
+            # No station observation, prediction or robot command runs here.
+            self._configure_timeout = 360
+            self._start_preparation()
+            self.wait_ready(lambda: time.monotonic() >= deadline)
+            self._interaction('model_progress', 'Dream trajectory solvers ready; joining the robot queue',
+                              progress_type='status')
+        except Exception:
+            self.close_transport()
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Dream preparation timed out before joining the robot queue') from None
+            raise
+        finally:
+            self._configure_timeout = 180
 
     def start_preparation(self, cancelled):
         self.cancelled = cancelled
@@ -452,7 +485,7 @@ class DreamAdapter:
                         fully_prepare=True,
                         action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
                         **({'kinematics': self._kinematics} if self._kinematics is not None else {}),
-                        cancelled=self._cancelled, timeout=180)
+                        cancelled=self._cancelled, timeout=self._configure_timeout)
                 self._worker_timings(reply)
                 if not reply['ok']:
                     self._failure = 'Dream SDK setup failed (' + reply.get('error_type', 'unknown') + ')'

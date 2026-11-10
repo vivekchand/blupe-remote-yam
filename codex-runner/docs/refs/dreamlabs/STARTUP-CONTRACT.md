@@ -6,7 +6,7 @@ Verified against official dreamlabs-client1.0.0 and dreamlabs1.0.0 wheel sources
 - `DreamClient.policy` opens a policy and creates a new observation window. `dream/client_ik.py:ClientIK.__init__` initializes the local solver. For EEF trajectory mode it warms the tick solve synchronously and starts trajectory compilation on a background thread; forward-kinematics initialization is also local. A duration around this whole policy call includes its setup and cannot automatically be called remote model inference.
 - `set_observation` retains the newest measured state and a timestamped camera window. The SDK requires monotonic observation timestamps within an episode.
 - `get_action` sends the latest state/window and creates or continues a stateful model session. Its EEF conversion/IK uses measured joint state and the commanded chunk anchor. A pre-Home prediction cannot be treated as a fresh post-Home prediction just by changing a flag or timestamp.
-- The shared Astra/Codex HomeScene protocol uses actual saved Home observations and strict scene/lease/configuration/freshness checks plus bind/discard hooks. Dream does not implement that protocol. SDK setup may overlap native Home after lease grant; live Dream prediction remains after confirmed Home and fresh state/images.
+- The shared Astra/Codex HomeScene protocol uses actual saved Home observations and strict scene/lease/configuration/freshness checks plus bind/discard hooks. Dream does not implement that protocol. Ordinary SDK setup may overlap native Home after lease grant. ClawMetry opts into synthetic solver preparation before queue admission; live Dream prediction in both modes remains after confirmed Home and fresh state/images.
 
 Source SHA-256 values (wheel contents, not runtime timing evidence):
 - `facade.py`: `24d3d83e21aaca76d48e20762864a249f4ca948560eb741a3211a51ad7f31104`
@@ -108,7 +108,32 @@ The raw worker waits for the existing background readiness event and executes
 the existing synthetic both-form warmup before acknowledging. A failed or
 cancelled warmup cannot establish readiness. Resident workers retain their
 existing preparation/reuse/reset semantics. Direct legacy configure callers may
-omit the flag. The180-second configuration and30-second prediction bounds,
-calibration, model checkpoints, cadence, solver settings and motion limits stay
-unchanged. No timed-out prediction is replayed; synthetic preparation results are
+omit the flag. Ordinary leased configuration retains its180-second bound and prediction retains its30-second bound. Calibration, model checkpoints, cadence, solver settings and motion limits stay unchanged. No timed-out prediction is replayed; synthetic preparation results are
 discarded. Native progress and `sdk_full_preparation` timing describe the wait.
+
+
+## ClawMetry preparation before queue admission
+
+ClawMetry enables the trusted `dream_prepare_before_queue` hosting option. The
+ordinary BluPe default remains lease-first preparation. This is constructor
+configuration, not a browser-controlled request parameter.
+
+The existing native pre-session lifecycle compiles both synthetic trajectory
+variants before creating a robot session. Cold configuration has a360-second
+budget within a600-second total preparation budget, including worker-slot wait.
+It performs no camera/state observation collection, model prediction or robot
+command. Stop/disconnect cancel it and release the single hosted worker slot.
+Setup failure, incomplete readiness or changed calibration prevent queue entry.
+The UI shows preparation and explicitly says that the run timer has not started.
+
+After readiness, the runner joins the ordinary queue for the selected duration,
+five minutes by default on ClawMetry. It checks the calibration again before
+admission and after lease grant. Home/fresh feedback remain prerequisites for
+actual prediction; prediction/recovery watchdogs and all motion checks remain
+unchanged. Queue handshake failure or cancellation stops only the newly created
+session. A stale preparation cannot reset a replacement run's Home state.
+
+The launch attempt binds deferred session/episode attribution to its submitting
+visitor. Preparation and the admitted run retain one interaction journal, so
+public Activity, runner identity, history and assessment ownership continue
+across the transition. No timed-out motion is retried or replayed.

@@ -116,14 +116,6 @@ class RunnerController(HomeSceneStartup):
             return self._join_new(provider, prompt, run_duration_s)
 
     def _join_new(self, provider: ProviderAdapter, prompt: str, run_duration_s: int = 300, *, prepared=False) -> dict[str, Any]:
-        self._cancel_home_plan()
-        self._home_plan = None
-        self._home_registered = False
-        self._home_disabled = False
-        self._home_sample_recorded = False
-        self._home_accepted_scene = None
-        self._home_accepted_job = None
-        self._home_next_poll = 0
         with self._lock:
             if prepared and (self._stop_event.is_set() or self._provider is not provider):
                 raise RuntimeError("Run preparation cancelled before joining the queue")
@@ -137,6 +129,17 @@ class RunnerController(HomeSceneStartup):
             self._error = None
             self._safety_error = None
             self._deadline_cancelled_session = None
+            previous_home = self._home_plan
+            self._home_plan = None
+            self._home_registered = False
+            self._home_disabled = False
+            self._home_sample_recorded = False
+            self._home_accepted_scene = None
+            self._home_accepted_job = None
+            self._home_next_poll = 0
+        # HomePlan.close joins its worker; do not hold the controller state lock.
+        if previous_home is not None:
+            previous_home.close(cancel=True)
         configure_workspace = getattr(provider, 'configure_robot_workspace', None)
         if callable(configure_workspace):
             configure_workspace(self._robot_id)
@@ -162,115 +165,134 @@ class RunnerController(HomeSceneStartup):
         if prepared and (self._stop_event.is_set() or self._provider is not provider):
             self._session_api.stop_session(session_id, reason='preparation_cancelled')
             raise RuntimeError('Run preparation cancelled while joining the queue')
-        events = self._session_api.open_events(session_id)
-        with self._lock:
-            # Status polling continues during the WebSocket handshake. Publish the
-            # new clock together with its session/state, never with an old terminal state.
-            self._run_duration_s = run_duration_s
-            self._run_started_at = created.get("run_started_at")
-            self._run_ended_at = None
-            self._analytics_run = {"run_id": uuid.uuid4().hex, "execution_confirmed": False,
-                                   "provider": provider.public_config().get("provider"),
-                                   "model": provider.public_config().get("model")}
-            self._provider = provider
-            self._steering_inbox = None
-            if hasattr(provider, 'cancelled'):
-                provider.cancelled = lambda: self._provider_cancelled(provider)
-            self._run_configuration = run_configuration(provider, prompt, run_duration_s)
-            self._prompt = prompt
-            self._session_id = session_id
-            self._episode_id = created.get("episode_id")
-            self._lease_id = None
-            self._command_step_id = 0
-            self._packets_submitted = 0
-            self._first_call_wander = False
-            self._status = str(created.get("status", "queued"))
-            # Publish timing with the new status: status polling must never see
-            # a new start time paired with the previous run's terminal state.
-            self._run_duration_s = run_duration_s
-            self._run_started_at = created.get("run_started_at")
-            self._run_ended_at = None
-            self._queue_position = created.get("position")
-            self._last_event_type = None
-            self._heartbeat_seen = False
-            self._episode = None
-            self._last_model_command = None
-            self._last_observation = None
-            self._return_to_rest_requested = False
-            self._operator_requested = False
-            self._run_events = []
-            self._submitted_step_ids = []
-            self._trajectory = None
-            self._last_completed_trajectory_result = None
-            self._workspace_feedback = None
-            self._workspace_replan_not_before = 0.
-            self._feedback_checks = []
-            self._execution_blocked_reason = None
-            self._run_metrics = dict(model_s=0.0, execution_s=0.0, left_path_m=0.0, right_path_m=0.0, model_calls=0, execution_packets=0, accepted_packets=0, distance_waypoints=0, confirmed_waypoints=0)
-            self._step_timings = []
-            self._last_step_completed_monotonic = None
-            self._latency = {}
-            self._last_action_submitted_monotonic = None
-            self._last_latency_log_monotonic = time.monotonic()
-            self._events = events
-            directory = provider.public_config().get('recording_path')
-            if not directory and self._recording_root:
-                directory = self._recording_root/('run_'+uuid.uuid4().hex)
-            self._interactions = InteractionLog(directory)
-            self._source_conversation_attempt_id = self._attempt_id
-            if not prepared:
-                self._run_share_conversation = bool(self._share_conversation)
-            if self._conversation_publisher:
-                self._conversation_publisher.close()
-            self._conversation_publisher = None
-            if self._share_conversation and callable(getattr(self._session_api, 'publish_public_conversation', None)):
-                from .conversation_publisher import ConversationPublisher
-                config = provider.public_config()
-                self._conversation_publisher = ConversationPublisher(
-                    self._session_api, session_id,
-                    (config.get('display_name') if config.get('task_progress') else None)
-                        or config.get('model') or provider.provider_name, prompt,
-                    secrets=(getattr(provider, '_api_key', ''),),
-                    task_progress=config.get('task_progress'),
-                    progress_source=(lambda: provider.public_config().get('task_progress'))
-                        if isinstance(config.get('task_progress'), dict) else None)
-            if hasattr(provider, 'interaction_sink'):
-                journal, publisher = self._interactions, self._conversation_publisher
-                metrics = self._run_metrics
-                import os
-                from .robocurve_policy import RoboCurveResponsesAdapter
-                self._first_call_wander = (
-                    self._robot_id in os.environ.get('YAM_FIRST_CALL_WANDER_ROBOTS', '').split(',')
-                    and isinstance(provider, RoboCurveResponsesAdapter))
-                first_wait = None
-                if self._first_call_wander:
-                    from .first_call_wait import FirstCallWait
-                    first_wait = FirstCallWait(self._session_api,
-                        lambda: dict(session_id=session_id, episode_id=self._episode_id, lease_id=self._lease_id),
-                        lambda: self._stop_event.is_set() or self._provider is not provider)
-                def record_interaction(kind, message, **details):
-                    if first_wait is not None and not self._home_registered:
-                        first_wait.interaction(kind, details)
-                    if kind == 'model_timing':
-                        elapsed = details.get('elapsed_s')
-                        if isinstance(elapsed, (int, float)) and math.isfinite(elapsed) and elapsed >= 0:
-                            with self._lock:
-                                metrics['model_s'] += elapsed
-                                metrics['model_calls'] += 1
-                    journal.add(kind, message, **details)
-                    if publisher:
-                        publisher.add(kind, message, **details)
-                provider.interaction_sink = record_interaction
-                if getattr(provider, 'supports_runtime_steering', False):
-                    from .steering import SteeringInbox
-                    # Retain receipts after provider teardown without retaining
-                    # the provider or its credentials through a bound callback.
-                    self._steering_inbox = SteeringInbox(record_interaction)
-                    provider.steering = self._steering_inbox
-            self._interactions.add('run_configuration', 'Configuration used for this run', configuration=self._run_configuration)
-            self._interactions.add('joined', 'Joined the policy queue',
-                                   session_id=session_id, task=prompt,
-                                   provider=provider.provider_name)
+        events = None
+        try:
+            events = self._session_api.open_events(session_id)
+            with self._lock:
+                if prepared and (self._stop_event.is_set() or self._provider is not provider):
+                    raise RuntimeError('Run preparation cancelled while opening the session')
+                # Status polling continues during the WebSocket handshake. Publish the
+                # new clock together with its session/state, never with an old terminal state.
+                self._run_duration_s = run_duration_s
+                self._run_started_at = created.get("run_started_at")
+                self._run_ended_at = None
+                self._analytics_run = {"run_id": uuid.uuid4().hex, "execution_confirmed": False,
+                                       "provider": provider.public_config().get("provider"),
+                                       "model": provider.public_config().get("model")}
+                self._provider = provider
+                self._steering_inbox = None
+                if hasattr(provider, 'cancelled'):
+                    provider.cancelled = lambda: self._provider_cancelled(provider)
+                self._run_configuration = run_configuration(provider, prompt, run_duration_s)
+                self._prompt = prompt
+                self._session_id = session_id
+                self._episode_id = created.get("episode_id")
+                self._lease_id = None
+                self._command_step_id = 0
+                self._packets_submitted = 0
+                self._first_call_wander = False
+                self._status = str(created.get("status", "queued"))
+                # Publish timing with the new status: status polling must never see
+                # a new start time paired with the previous run's terminal state.
+                self._run_duration_s = run_duration_s
+                self._run_started_at = created.get("run_started_at")
+                self._run_ended_at = None
+                self._queue_position = created.get("position")
+                self._last_event_type = None
+                self._heartbeat_seen = False
+                self._episode = None
+                self._last_model_command = None
+                self._last_observation = None
+                self._return_to_rest_requested = False
+                self._operator_requested = False
+                self._run_events = []
+                self._submitted_step_ids = []
+                self._trajectory = None
+                self._last_completed_trajectory_result = None
+                self._workspace_feedback = None
+                self._workspace_replan_not_before = 0.
+                self._feedback_checks = []
+                self._execution_blocked_reason = None
+                self._run_metrics = dict(model_s=0.0, execution_s=0.0, left_path_m=0.0, right_path_m=0.0, model_calls=0, execution_packets=0, accepted_packets=0, distance_waypoints=0, confirmed_waypoints=0)
+                self._step_timings = []
+                self._last_step_completed_monotonic = None
+                self._latency = {}
+                self._last_action_submitted_monotonic = None
+                self._last_latency_log_monotonic = time.monotonic()
+                self._events = events
+                if not prepared:
+                    directory = provider.public_config().get('recording_path')
+                    if not directory and self._recording_root:
+                        directory = self._recording_root/('run_'+uuid.uuid4().hex)
+                    self._interactions = InteractionLog(directory)
+                self._source_conversation_attempt_id = self._attempt_id
+                if not prepared:
+                    self._run_share_conversation = bool(self._share_conversation)
+                if self._conversation_publisher:
+                    self._conversation_publisher.close()
+                self._conversation_publisher = None
+                if self._share_conversation and callable(getattr(self._session_api, 'publish_public_conversation', None)):
+                    from .conversation_publisher import ConversationPublisher
+                    config = provider.public_config()
+                    self._conversation_publisher = ConversationPublisher(
+                        self._session_api, session_id,
+                        (config.get('display_name') if config.get('task_progress') else None)
+                            or config.get('model') or provider.provider_name, prompt,
+                        secrets=(getattr(provider, '_api_key', ''),),
+                        task_progress=config.get('task_progress'),
+                        progress_source=(lambda: provider.public_config().get('task_progress'))
+                            if isinstance(config.get('task_progress'), dict) else None)
+                if hasattr(provider, 'interaction_sink'):
+                    journal, publisher = self._interactions, self._conversation_publisher
+                    metrics = self._run_metrics
+                    import os
+                    from .robocurve_policy import RoboCurveResponsesAdapter
+                    self._first_call_wander = (
+                        self._robot_id in os.environ.get('YAM_FIRST_CALL_WANDER_ROBOTS', '').split(',')
+                        and isinstance(provider, RoboCurveResponsesAdapter))
+                    first_wait = None
+                    if self._first_call_wander:
+                        from .first_call_wait import FirstCallWait
+                        first_wait = FirstCallWait(self._session_api,
+                            lambda: dict(session_id=session_id, episode_id=self._episode_id, lease_id=self._lease_id),
+                            lambda: self._stop_event.is_set() or self._provider is not provider)
+                    def record_interaction(kind, message, **details):
+                        if first_wait is not None and not self._home_registered:
+                            first_wait.interaction(kind, details)
+                        if kind == 'model_timing':
+                            elapsed = details.get('elapsed_s')
+                            if isinstance(elapsed, (int, float)) and math.isfinite(elapsed) and elapsed >= 0:
+                                with self._lock:
+                                    metrics['model_s'] += elapsed
+                                    metrics['model_calls'] += 1
+                        journal.add(kind, message, **details)
+                        if publisher:
+                            publisher.add(kind, message, **details)
+                    provider.interaction_sink = record_interaction
+                    if getattr(provider, 'supports_runtime_steering', False):
+                        from .steering import SteeringInbox
+                        # Retain receipts after provider teardown without retaining
+                        # the provider or its credentials through a bound callback.
+                        self._steering_inbox = SteeringInbox(record_interaction)
+                        provider.steering = self._steering_inbox
+                self._interactions.add('run_configuration', 'Configuration used for this run', configuration=self._run_configuration)
+                self._interactions.add('joined', 'Joined the policy queue',
+                                       session_id=session_id, task=prompt,
+                                       provider=provider.provider_name)
+        except Exception:
+            # A created queue entry belongs to this admission even if its event
+            # handshake fails or Stop arrives before publication. Never orphan it.
+            if events is not None:
+                try:
+                    events.close()
+                except Exception:
+                    pass
+            try:
+                self._session_api.stop_session(session_id, reason='admission_failed')
+            except Exception as cleanup_error:
+                self._interactions.add('error', 'Could not confirm queue admission cleanup',
+                                       error_type=type(cleanup_error).__name__)
+            raise
         return self.status()
 
     def join_and_run(
@@ -310,7 +332,10 @@ class RunnerController(HomeSceneStartup):
                 self._command_step_id=0;self._packets_submitted=0
                 self._last_model_command=None;self._last_observation=None
                 self._feedback_checks=[];self._queue_position=None
-                self._interactions=InteractionLog(provider.public_config().get('recording_path'))
+                directory = provider.public_config().get('recording_path')
+                if not directory and self._recording_root:
+                    directory = self._recording_root/('run_'+uuid.uuid4().hex)
+                self._interactions=InteractionLog(directory)
                 self._run_share_conversation=bool(self._share_conversation)
                 self._source_conversation_attempt_id=self._attempt_id
                 journal=self._interactions
@@ -347,6 +372,12 @@ class RunnerController(HomeSceneStartup):
                 self._join_new(provider,prompt,run_duration_s,prepared=True)
             self._run_loop(max_steps)
         except Exception as exc:
+            close = getattr(provider, 'close_transport', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
             with self._lock:
                 if self._provider is not provider:return
                 if not self._stop_event.is_set():

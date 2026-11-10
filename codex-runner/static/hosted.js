@@ -1486,8 +1486,10 @@ function createRunLaunchGuard() {
     updateSavedKey(state.saved_key_providers);window.yamAnalytics?.observe(state);
     $('apiKey').value = '';$('runSettings').open = true;$('localRunDialog').close();
     active = ['queued','preparing','running'].includes(state.status || 'queued');
-    guideRunAttention({status:state.status || 'queued'});
-    message((['molmoact2','dreamzero'].includes(payload.provider) && !state.session_id ? 'Preparing the model GPU. The robot queue and run timer start after it is ready.' : payload.provider === 'groot' ? 'You’re in the queue. GR00T GPU warmup has started.' : 'You’re in the queue. Your position is highlighted above.'));
+    guideRunAttention({...state, status:state.status || 'queued'});
+    message((['dream','dream_flash'].includes(payload.provider) && !state.session_id && state.status === 'preparing'
+      ? 'Preparing Dream trajectory solvers. The robot queue and run timer start after they are ready.'
+      : ['molmoact2','dreamzero'].includes(payload.provider) && !state.session_id ? 'Preparing the model GPU. The robot queue and run timer start after it is ready.' : payload.provider === 'groot' ? 'You’re in the queue. GR00T GPU warmup has started.' : 'You’re in the queue. Your position is highlighted above.'));
     }
     catch (error) {
       if (error.stale) return;
@@ -1588,31 +1590,35 @@ function createRunLaunchGuard() {
     const preparing = phase === 'preparing';
     const live = phase === 'running';
     const taskProgress = !!state.provider?.task_progress;
+    const preparingDream = preparing && !state.session_id && (state.preparation_before_queue === true || state.provider?.preparation_before_queue === true);
     const warmingUp = !taskProgress && live && state.first_call_wander_enabled === true && state.run_metrics?.model_calls === 0;
-    const reviewing = !!((taskProgress || state.new_submission) && preparing && !state.session_id && !state.episode_id);
+    const reviewing = !preparingDream && !!((taskProgress || state.new_submission) && preparing && !state.session_id && !state.episode_id);
     const attention = reviewing ? 'reviewing' : taskProgress && preparing ? 'initializing' : phase;
     const changed = state.new_submission || session !== attentionSession || attention !== attentionPhase;
-    const waiting = queued || preparing && !taskProgress && !reviewing;
+    const waiting = queued || preparing && !taskProgress && !reviewing && !preparingDream;
     $('yourQueue').classList.toggle('yourTurnWaiting', waiting);
     $('liveConversationPanel').classList.toggle('yourTaskReview', reviewing);
     $('position').closest('.queuePlace').hidden = !(waiting || live);
     $('liveViewer').classList.toggle('yourRunLive', live);
     $('viewerCue').hidden = !(preparing || live || queued);
     $('viewerCueTitle').textContent = reviewing ? 'Reviewing your prompt…'
+      : preparingDream ? 'Preparing Dream trajectory solvers'
       : queued ? 'Waiting in the robot queue'
       : taskProgress && live ? 'Your run is active'
       : preparing ? 'Your run is preparing' : warmingUp ? 'Your robot is warming up' : 'Your run is live';
     $('viewerCueDetail').textContent = reviewing
       ? 'Working through your prompt and preparing the next steps.'
+      : preparingDream ? 'Preparing before joining the robot queue. Your run timer has not started. You can stop here.'
       : queued ? 'Your prompt is prepared. Waiting for your turn.'
       : preparing
       ? 'The robot is getting ready. You can stop your run here.'
       : warmingUp ? `The arms do a short dance while ${liveModelName} plans the first move. Your task begins after they return.`
       : 'Watch your robot here. The video may follow with a short delay.';
-    $('position').textContent = queued ? (state.queue_position ? `#${state.queue_position}` : 'Joining…') : preparing ? (reviewing || taskProgress ? '—' : 'Up next') : live ? 'Your turn' : '—';
+    $('position').textContent = queued ? (state.queue_position ? `#${state.queue_position}` : 'Joining…') : preparing ? (reviewing || taskProgress || preparingDream ? '—' : 'Up next') : live ? 'Your turn' : '—';
     $('queueGuidance').textContent = queued
       ? (state.queue_position === 1 ? "You're next. We'll bring you to the viewer when your run starts." : "You're in the queue. We'll bring you to the viewer when it's your turn.")
       : reviewing ? 'Reviewing your prompt and preparing the next steps.'
+      : preparingDream ? 'Preparing Dream trajectory solvers. The robot queue and run timer start after they are ready.'
       : preparing ? 'The robot is getting ready for your run.'
       : warmingUp ? `Startup dance — waiting for ${liveModelName}’s first decision.`
       : live ? (taskProgress ? 'Your run is active — watch the highlighted viewer.' : 'Your run is live — watch the highlighted viewer.')
