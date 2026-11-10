@@ -200,6 +200,10 @@
   .meetingConsole.clawmetryRoom .cm-room-integrate{font-size:12px;min-height:36px;padding:6px 10px}
   .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras{grid-template-rows:calc((100vw - 24px)*.5625) 68px;gap:7px}
   .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras>figure[data-camera-role]:not([data-meeting-main]){display:block}
+  .meetingConsole.clawmetryRoom .meetingRoom.meetingPanelOpen:not(.meetingCamerasHidden,.meetingKeyboardOpen)
+  .videoPanel:has(>.meetingPromptDock):has(>#liveViewer:not([data-meeting-count="0"],[data-meeting-count="1"])){
+    --meeting-thumbnail-height:76px;
+  }
   .meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras>figure[data-camera-role]:not([data-meeting-main]){display:none}
   .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras[data-meeting-count="1"],.meetingConsole.clawmetryRoom .meetingCamerasHidden #liveViewer.cameras{grid-template-rows:calc((100vw - 24px)*.5625)}
   .meetingConsole.clawmetryRoom .meetingRoom #liveViewer.cameras .expandCamera{opacity:1}

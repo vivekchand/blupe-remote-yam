@@ -14,6 +14,9 @@ const $ = id => elements[id] ||= {hidden:false,textContent:'',classes:new Set(),
   }},
   closest(selector){assert.equal(selector,'.queuePlace');return $('queuePlace');},
   focus(){this.focusCount++;},scrollIntoView(options){this.scrolls.push(options);}};
+const message = text => {
+  for (const id of ['message', 'localRunMessage']) $(id).textContent = text;
+};
 let selectedMode = null;
 const modeButtons = {};
 for (const mode of ['reasoning', 'conversation', 'visitor', 'hide', 'clawmetry']) {
@@ -29,7 +32,7 @@ const document = {
   },
   getElementById:$,
 };
-const context = vm.createContext({$,document,window:{matchMedia:()=>({matches:true})}});
+const context = vm.createContext({$,document,message,window:{matchMedia:()=>({matches:true})}});
 const openStart = source.indexOf('  function openConversationPanel()');
 vm.runInContext(source.slice(openStart,source.indexOf('  let setupProvider = null;',openStart)),context);
 // Run must preserve the user's selected Activity tab, including optional tabs
@@ -140,4 +143,28 @@ assert.equal($('queuePlace').hidden,true);
 assert.equal($('position').textContent,'—');
 assert.equal($('yourQueue').classes.has('yourTurnWaiting'),false);
 assert.equal(selectedMode,'clawmetry');
+
+// The status below Run follows the owner stage. It must stop describing the
+// queue after admission, without replacing a warning or stop confirmation.
+const updateInline = (status, initial = false) => {
+  render({status,session_id:'fable-fixture',queue_position:2});
+  context.showInlineRunStage(status, initial);
+};
+message('Checking your subscription connection…');
+updateInline('queued', true);
+assert.match($('message').textContent, /in the queue/);
+updateInline('preparing');
+assert.equal($('message').textContent,'The robot is getting ready for your run.');
+updateInline('running');
+assert.match($('message').textContent, /Your run is live/);
+assert.equal($('message').textContent,$('localRunMessage').textContent);
+updateInline('stopped');
+assert.equal($('message').textContent,'');
+updateInline('queued', true);
+message('GPU startup failed. Leave the queue and try again.');
+updateInline('preparing');
+assert.match($('message').textContent, /GPU startup failed/);
+message('Stop requested.');
+updateInline('stopped');
+assert.equal($('message').textContent,'Stop requested.');
 console.log('Queue handoff checks passed');

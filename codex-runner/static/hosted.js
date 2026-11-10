@@ -20,6 +20,7 @@ function playgroundEntryModel(search, options, session = {}) {
   const requested = (new URLSearchParams(search).get('model') || '').trim().toLowerCase();
   const aliases = {dream:'dream', 'dream-1':'dream', 'dreamlabs/dream-1-beta':'dream',
     terra:'terra', 'gpt-6.1-terra':'terra',
+    fable:'fable', 'claude-fable-5-2':'fable',
     astra:'astra', 'gpt-6-astra':'astra', argon:'argon', 'gemini-4-argon':'argon'};
   const name = Object.hasOwn(aliases, requested) ? aliases[requested] : (session.local_runner ? null : 'dream');
   if (!name) return null;
@@ -31,6 +32,7 @@ function playgroundEntryModel(search, options, session = {}) {
   };
   const astra = () => select('gpt-6-astra', ['guest_astra', 'codex', 'openai']);
   if (name === 'terra') return select('gpt-6.1-terra', ['guest_astra', 'codex', 'openai']);
+  if (name === 'fable') return select('claude-fable-5-2', ['guest_claude', 'claude', 'anthropic']);
   return (name === 'dream' ? select('dreamlabs/dream-1-beta', ['dream'])
     : name === 'argon' ? select('gemini-4-argon', ['guest_gemini', 'gemini']) : astra())
     || (session.local_runner ? null : astra());
@@ -48,6 +50,10 @@ function currentRunHeading(run, result = null) {
     : run.error === 'Run reached time limit' ? 'Time limit reached'
     : run.error ? 'Failed' : result?.label || states[run.status] || 'Status unavailable';
   return {task, status};
+}
+
+function activeRunPrompt(run) {
+  return ['preparing', 'running'].includes(run?.status) ? currentRunHeading(run).task : '';
 }
 
 function createRunnerIdentity($, storage) {
@@ -1485,11 +1491,13 @@ function createRunLaunchGuard() {
     renderCurrentConversation(runLaunchGuard.conversation(null),state);
     updateSavedKey(state.saved_key_providers);window.yamAnalytics?.observe(state);
     $('apiKey').value = '';$('runSettings').open = true;$('localRunDialog').close();
-    active = ['queued','preparing','running'].includes(state.status || 'queued');
-    guideRunAttention({...state, status:state.status || 'queued'});
-    message((['dream','dream_flash'].includes(payload.provider) && !state.session_id && state.status === 'preparing'
-      ? 'Preparing Dream trajectory solvers. The robot queue and run timer start after they are ready.'
-      : ['molmoact2','dreamzero'].includes(payload.provider) && !state.session_id ? 'Preparing the model GPU. The robot queue and run timer start after it is ready.' : payload.provider === 'groot' ? 'You’re in the queue. GR00T GPU warmup has started.' : 'You’re in the queue. Your position is highlighted above.'));
+    const status = state.status || 'queued';
+    active = ['queued','preparing','running'].includes(status);
+    guideRunAttention({...state, status});
+    if (['molmoact2','dreamzero'].includes(payload.provider) && !state.session_id)
+      message('Preparing the model GPU. The robot queue and run timer start after it is ready.');
+    else if (payload.provider === 'groot') message('You’re in the queue. GR00T GPU warmup has started.');
+    else showInlineRunStage(status, true);
     }
     catch (error) {
       if (error.stale) return;
@@ -1543,6 +1551,16 @@ function createRunLaunchGuard() {
     catch (error) { message(error.message, true); }
     buttons();
   });
+  function renderActiveRunPrompt(run) {
+    const prompt = $('meetingSpectatorPrompt');
+    if (!prompt) return;
+    const task = activeRunPrompt(run);
+    prompt.hidden = !task;
+    if (prompt.textContent !== task) {
+      prompt.textContent = task;
+      prompt.title = task;
+    }
+  }
   // Shared spectator stopwatch, anchored to server elapsed time rather than the viewer's clock.
   let stopwatch = null;
   const stopwatchTime = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
@@ -1633,6 +1651,15 @@ function createRunLaunchGuard() {
     }
     attentionSession = session;
     attentionPhase = attention;
+  }
+  let inlineRunStage = '';
+  function showInlineRunStage(status, initial = false) {
+    const current = $('message').textContent;
+    const ownsMessage = initial || !current || current === inlineRunStage;
+    inlineRunStage = ['queued', 'preparing', 'running'].includes(status) ? $('queueGuidance').textContent : '';
+    // Let a specific warning or user-action result stay visible. Avoid
+    // announcing the same stage on each status poll.
+    if (ownsMessage && current !== inlineRunStage) message(inlineRunStage);
   }
   function modelResponseTools(event) {
     if (event?.kind !== 'model_response') return [];
@@ -1750,8 +1777,20 @@ function createRunLaunchGuard() {
     if (live.status === 'blocked' && live.guard_admission_verified === true) lines.push('Execution: blocked before model verification, model calls or robot queue admission.');
     else if (live.reviewing_prompt) lines.push('Execution: waiting for the runner to accept this request.');
     else {
-      lines.push(actual ? 'Recorded model: ' + modelLabel(actual) + ' · ' + actual
-        : live.model_name ? 'Runner-reported model: ' + live.model_name : 'Model: not recorded for this run.');
+      if (actual === 'claude-fable-5-2' || requested === 'claude-fable-5-2') {
+        const verified = (live.events || []).find(event => event.kind === 'model_response' &&
+          (event.resolved_model || event.details?.resolved_model) === 'claude-fable-5-2');
+        const policy = own.policy || verified?.policy || verified?.details?.policy;
+        const approach = {robocurve_no_demo:'RoboCurve',so101_cartesian:'SO101 Cartesian policy',
+          bimanual_so101_cartesian:'Bimanual SO101 Cartesian policy',makerarm_cartesian:'MakerArm Cartesian policy'}[policy];
+        if (approach) lines.push('Approach: ' + approach);
+        lines.push(verified || own.resolved_model === 'claude-fable-5-2'
+          ? 'Verified model: Claude Fable 5.2 · claude-fable-5-2'
+          : 'Requested model: Claude Fable 5.2 · provider model not confirmed');
+      } else {
+        lines.push(actual ? 'Recorded model: ' + modelLabel(actual) + ' · ' + actual
+          : live.model_name ? 'Runner-reported model: ' + live.model_name : 'Model: not recorded for this run.');
+      }
       const providerNames = {codex:'Codex / ChatGPT subscription',claude:'Claude Code / Claude subscription',openai:'OpenAI API',anthropic:'Anthropic API',groot:'GR00T policy',local_raise_lower:'Built-in arm motion'};
       if (own.funding === 'sponsored_claude_subscription')
         lines.push('Runner: Claude Code · BluPe’s Claude subscription');
@@ -1972,6 +2011,7 @@ function createRunLaunchGuard() {
       : 'No policy is running.';
     const live = runLaunchGuard.conversation(state.public_run,state);
     syncStopwatch(state.public_run, state.queue_snapshot?.generated_at);
+    renderActiveRunPrompt(state.public_run);
     const taskFailure = renderCurrentConversation(live,state);
     active = ['queued', 'preparing', 'running'].includes(state.status);
     ownRunLive = ['preparing', 'running'].includes(state.status);
@@ -1988,6 +2028,7 @@ function createRunLaunchGuard() {
     else if (state.provider?.vision?.retry?.state === 'retrying') message(state.provider.vision.retry.message, state.provider.vision.retry.cause === 'No image');
     else if (state.provider?.vision?.retry?.state === 'failed') message(state.provider.vision.retry.message, true);
     else if (state.provider?.vision?.retry?.state === 'recovered' && /^(Waiting for next |No image)/.test($('message').textContent)) message('Camera feeds recovered. Continuing the run.');
+    else showInlineRunStage(state.status);
     const queue = state.queue_snapshot;
     renderPublicRunNotice(state, taskFailure);
     const station = queue?.stations?.find(item => item.jetson_id === selectedRobot);
@@ -2620,6 +2661,10 @@ function createRunLaunchGuard() {
     context:() => robotGeneration + ':' + csrf, requestId:() => crypto.randomUUID(), changed:buttons,
   });
   window.addEventListener('blupe-robot-selected', () => steeringComposer.update());
+  window.addEventListener('blupe-robot-selected', () => {
+    syncStopwatch(null);
+    renderActiveRunPrompt(null);
+  });
   const originalCameraMarkup = $('liveViewer').innerHTML;
   let modelCameraNames = new Set();
   let cameraNames = ['left', 'top', 'right'], camerasDisconnected = false, cameraEpoch = 0;
@@ -2842,7 +2887,7 @@ function createRunLaunchGuard() {
         if (session.claude) {
           claudeModel = session.claude_model || claudeModel;
           const option = document.createElement('option');
-          option.value = 'claude'; option.textContent = 'Claude subscription · Opus 5.5+'; option.dataset.model = claudeModel;
+          option.value = 'claude'; option.textContent = 'Claude subscription'; option.dataset.model = claudeModel;
           if (!$('provider').querySelector('[value=claude]')) $('provider').prepend(option);
           $('claudeStatus').textContent = session.claude.message;
         }
@@ -3181,7 +3226,8 @@ function bindQuickTaskDraft(prompt, quick) {
     const claude = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?$/.exec(id);
     let label = astra ? 'Astra ' + astra[1] : claude
       ? claude[1][0].toUpperCase() + claude[1].slice(1) + ' ' + claude[2] + (claude[3] ? '.' + claude[3] : '') : id;
-    if (['codex','claude'].includes(option.value)) label += ' · subscription';
+    if (id === 'claude-fable-5-2' && option.value === 'anthropic') label += ' · API key';
+    else if (['codex','claude'].includes(option.value)) label += ' · subscription';
     return {id,label};
   }
   function updateComposer() {

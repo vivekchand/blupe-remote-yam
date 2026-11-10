@@ -30,6 +30,7 @@ class ResponsesAdapter:
     """Small Responses-compatible adapter with no SDK dependency."""
 
     provider_name = "responses"
+    _include_http_error_detail = True
 
     def __init__(self, api_key: str, model: str, endpoint: str, *, camera_source: CameraFrameSource | None = None) -> None:
         if not api_key.strip():
@@ -224,10 +225,11 @@ class ResponsesAdapter:
             self._contact_issue = None
             detail = ""
             try:
-                body = json.loads(exc.read(16384).decode("utf-8"))
-                api_error = body.get("error", {})
-                if isinstance(api_error, dict):
-                    detail = " | ".join(str(api_error[k]) for k in ("code", "message") if api_error.get(k))
+                if self._include_http_error_detail:
+                    body = json.loads(exc.read(16384).decode("utf-8"))
+                    api_error = body.get("error", {})
+                    if isinstance(api_error, dict):
+                        detail = " | ".join(str(api_error[k]) for k in ("code", "message") if api_error.get(k))
             except (ValueError, UnicodeError, AttributeError):
                 pass
             finally:
