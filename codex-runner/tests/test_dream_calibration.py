@@ -130,9 +130,10 @@ def test_worker_must_confirm_actual_selected_profile_before_ready(tmp_path, conf
         def call(self, command, **payload):
             calls.append((command, payload))
             binding = payload['kinematics']['binding']
+            ready = dict(fully_ready=True, trajectory_variants=['independent','coupled'])
             if confirm == 'wrong-envelope':
-                return dict(ok=True, result={}, kinematic_calibration=binding)
-            return dict(ok=True, result={'kinematic_calibration':binding if confirm else None})
+                return dict(ok=True, result=ready, kinematic_calibration=binding)
+            return dict(ok=True, result={**ready,'kinematic_calibration':binding if confirm else None})
         def close(self): pass
     selected = report()
     provider = DreamAdapter(provider='dream', model='dreamlabs/dream-1-beta',

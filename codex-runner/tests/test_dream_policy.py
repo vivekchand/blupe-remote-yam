@@ -44,6 +44,9 @@ class Worker:
             if self.hold:
                 self.hold.wait(2)
             return {'ok': True, 'result': {'action': action(), 'timing': {'rtt_ms': 600}}}
+        if command == 'configure':
+            return {'ok': True, 'result': {'fully_ready': True,
+                                         'trajectory_variants': ['independent', 'coupled']}}
         return {'ok': True, 'result': {}}
 
     def close(self):
@@ -535,9 +538,9 @@ def test_stop_cancels_session_recovery_before_another_prediction(tmp_path):
     provider.worker_factory=SessionWorker
     cancelled=threading.Event()
     provider.cancelled=cancelled.is_set
-    provider.interaction_sink=lambda kind,*args,**kwargs:cancelled.set() if kind=='model_progress' else None
     try:
         provider.wait_ready(lambda:False)
+        provider.interaction_sink=lambda kind,*args,**kwargs:cancelled.set() if kind=='model_progress' else None
         provider._worker.responses=[expired_reply()]
         with pytest.raises(RuntimeError,match='cancelled'):
             provider.build_trajectory('move',observation(),0)
@@ -625,14 +628,25 @@ def test_real_worker_bridge_preserves_warmup_then_sdk_protocol_failure(tmp_path,
     """
     sdk = tmp_path/'controlled_sdk'; sdk.mkdir()
     (sdk/'dream.py').write_text('''
-import os
+import os, threading
+from types import SimpleNamespace
+import numpy as np
 __version__ = '1.0.0'
+def _solve_traj(*args):return [np.zeros((48,6)),np.zeros((48,6))]
+class Solver:
+    sides=('right','left');side_rest=np.zeros((2,6));side_base=np.zeros((2,3))
+    def fk(self,q,side):return np.eye(4)
+    def solve_traj(self,*args):return _solve_traj(*range(10),None,{})
 class DreamServerError(RuntimeError):
     code='DA-2000'; reason='pool_warming'; retryable=True; retry_after_s=0
 class DreamProtocolError(RuntimeError): pass
 class DreamClient:
     last_timing = None
-    def __init__(self): self.calls=0
+    def __init__(self):
+        self.calls=0
+        event=threading.Event();event.set()
+        self._policy=SimpleNamespace(_ik=SimpleNamespace(traj_ready=event,
+            _solver=Solver(),_solve_spec=lambda:SimpleNamespace(solve='traj')))
     def policy(self, config): pass
     def close(self): pass
     def set_observation(self, frames, state, timestamp):

@@ -206,6 +206,7 @@ def main():
 
     configured_rates = {}
     configured_kinematics = {}
+    configured_variants = {}
 
     def prepare_ik(client, spans):
         # A changed playback clock creates a fresh IK instance too. Preserve
@@ -217,10 +218,14 @@ def main():
                 from .dream_ik_preparation import prepare_trajectory_variants
             except ImportError:
                 from dream_ik_preparation import prepare_trajectory_variants
-            return prepare_trajectory_variants(client._policy._ik)
+            variants = prepare_trajectory_variants(client._policy._ik)
+            if variants != ['independent', 'coupled']:
+                raise RuntimeError('Dream trajectory preparation contract is incomplete')
+            return variants
 
     def configure(client, command, spans):
         nonlocal linear_algebra, observer
+        configured_variants.pop(id(client), None)
         if dream.__version__ != '1.0.0':
             raise ValueError('Unsupported Dream SDK version')
         if observer is None:
@@ -286,12 +291,15 @@ def main():
                 # its pinned readiness event; never advertise a partially
                 # prepared solver. No observations or get_action are involved.
                 variants[checkpoint] = prepare_ik(current, spans)
+                configured_variants[id(current)] = variants[checkpoint]
             prepared = True
             client = None
             return {'sdk_version': dream.__version__, 'fully_ready': True,
                     'checkpoints': checkpoints, 'trajectory_variants': variants,
                     'ik_linear_algebra': linear_algebra}
         if kind == 'configure':
+            if 'fully_prepare' in command and type(command['fully_prepare']) is not bool:
+                raise ValueError('Dream preparation flag must be a boolean')
             checkpoint = command['checkpoint']
             if prepared:
                 if checkpoint not in clients:
@@ -304,14 +312,22 @@ def main():
                 client = clients[checkpoint]
                 if configured_rates[id(client)] != command.get('action_hz', 20):
                     configure(client, command, spans)
-                    prepare_ik(client, spans)
+                    configured_variants[id(client)] = prepare_ik(client, spans)
                 with stage(spans, 'sdk_reset'):
                     reset_episode(client)
             else:
                 configure(client, command, spans)
+                if command.get('fully_prepare') is True:
+                    # Per-visitor workers need the same readiness guarantee as
+                    # resident prime; never cold-compile the other coupling form
+                    # during a prediction under its shorter watchdog.
+                    configured_variants[id(client)] = prepare_ik(client, spans)
             last_timestamp = None
             return {'sdk_version': dream.__version__, 'prepared_reused': prepared,
                     'ik_linear_algebra': linear_algebra,
+                    **({'fully_ready': configured_variants.get(id(client)) == ['independent', 'coupled'],
+                        'trajectory_variants': configured_variants.get(id(client))}
+                       if command.get('fully_prepare') is True else {}),
                     'kinematic_calibration': configured_kinematics.get(id(client))}
         if kind == 'release':
             with stage(spans, 'sdk_reset'):
