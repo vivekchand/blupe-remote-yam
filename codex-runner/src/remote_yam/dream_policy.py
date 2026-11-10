@@ -404,7 +404,7 @@ class DreamAdapter:
 
     def _worker_timings(self, reply):
         allowed = {'sdk_import', 'sdk_client_init', 'sdk_configure', 'sdk_kinematics_install',
-                   'sdk_observation_update', 'sdk_get_action', 'sdk_reset'}
+                   'sdk_observation_update', 'sdk_get_action', 'sdk_reset', 'sdk_full_preparation'}
         for row in reply.get('stage_timings') or []:
             if not isinstance(row, dict) or row.get('stage') not in allowed:
                 continue
@@ -445,14 +445,22 @@ class DreamAdapter:
                     with journal_span(self.interaction_sink, 'worker_start'):
                         worker = self.worker_factory(self.python, self.credentials, self.directory)
                     self._worker = worker
+                self._interaction('model_progress', 'Dream is preparing trajectory solvers before motion',
+                                  progress_type='status')
                 with journal_span(self.interaction_sink, 'worker_configure'):
                     reply = worker.call('configure', checkpoint=self.model,
+                        fully_prepare=True,
                         action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
                         **({'kinematics': self._kinematics} if self._kinematics is not None else {}),
                         cancelled=self._cancelled, timeout=180)
                 self._worker_timings(reply)
                 if not reply['ok']:
                     self._failure = 'Dream SDK setup failed (' + reply.get('error_type', 'unknown') + ')'
+                    return
+                ready = reply.get('result')
+                if (not isinstance(ready, dict) or ready.get('fully_ready') is not True
+                        or ready.get('trajectory_variants') != ['independent', 'coupled']):
+                    self._failure = 'Dream trajectory solvers are not fully prepared'
                     return
                 if self._kinematics is not None and (reply.get('result') or {}).get('kinematic_calibration') != self._kinematics['binding']:
                     self._failure = 'Dream worker did not confirm the selected calibration; no prediction will run'
@@ -734,10 +742,15 @@ class DreamAdapter:
             if self._kinematics is not None:
                 self.configure_robot_workspace(self.robot_id)
                 reply = self._worker.call('configure', checkpoint=self.model,
+                    fully_prepare=True,
                     action_hz=30 if self.trajectory_cadence_hz == 30 else 20,
                     kinematics=self._kinematics, cancelled=self._cancelled, timeout=180)
                 self._worker_timings(reply)
-                if not reply.get('ok') or (reply.get('result') or {}).get('kinematic_calibration') != self._kinematics['binding']:
+                ready = reply.get('result')
+                if (reply.get('ok') is not True or not isinstance(ready, dict)
+                        or ready.get('fully_ready') is not True
+                        or ready.get('trajectory_variants') != ['independent', 'coupled']
+                        or ready.get('kinematic_calibration') != self._kinematics['binding']):
                     raise DreamWorkerUnavailable('Recovered Dream worker did not confirm the selected calibration')
             # Revalidate the SAME lease, completed step and idle executor before
             # requesting another prediction. No failed request/action is replayed.

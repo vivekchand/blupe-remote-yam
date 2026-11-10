@@ -117,11 +117,22 @@ def test_real_worker_passes_new_prompt_to_sdk_without_resetting_session(tmp_path
     sdk.mkdir()
     trace = tmp_path / 'sdk-prompts.jsonl'
     (sdk / 'dream.py').write_text('''
-import json, os
+import json, os, threading
+from types import SimpleNamespace
+import numpy as np
 __version__ = '1.0.0'
+def _solve_traj(*args):return [np.zeros((48,6)),np.zeros((48,6))]
+class Solver:
+    sides=('right','left');side_rest=np.zeros((2,6));side_base=np.zeros((2,3))
+    def fk(self,q,side):return np.eye(4)
+    def solve_traj(self,*args):return _solve_traj(*range(10),None,{})
 class DreamClient:
     last_timing = {'rtt_ms': 1}
-    def __init__(self): self.session_id = None
+    def __init__(self):
+        self.session_id = None
+        event=threading.Event();event.set()
+        self._policy=SimpleNamespace(_ik=SimpleNamespace(traj_ready=event,
+            _solver=Solver(),_solve_spec=lambda:SimpleNamespace(solve='traj')))
     def policy(self, config): pass
     def reset_episode(self): raise AssertionError('Steering must not reset the SDK episode')
     def close(self): pass

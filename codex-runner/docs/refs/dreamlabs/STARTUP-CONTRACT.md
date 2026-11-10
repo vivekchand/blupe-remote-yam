@@ -93,3 +93,22 @@ module-global kernel binding. Inspecting `__func__` directly on the tracing
 function breaks this startup order. The regression installs real diagnostics
 before preparation; exact-SDK validation repeats both-form preparation with
 the diagnostics installed, retaining the same kernel arguments and results.
+
+## Per-visitor worker readiness
+
+The November10 hosted trial accepted ten packets, then its first coupled48-row
+solve exceeded the unchanged30-second prediction watchdog during local JAX
+compilation, after HTTP had completed in0.608seconds. The semaphore-backed
+per-visitor worker used plain `configure`, which did not call `prepare_ik`;
+both-form preparation existed only in the resident `prime` and rate-change paths.
+
+DreamAdapter now requests `fully_prepare=True` during initial configuration and
+requires an explicit `fully_ready=True` receipt naming both trajectory variants.
+The raw worker waits for the existing background readiness event and executes
+the existing synthetic both-form warmup before acknowledging. A failed or
+cancelled warmup cannot establish readiness. Resident workers retain their
+existing preparation/reuse/reset semantics. Direct legacy configure callers may
+omit the flag. The180-second configuration and30-second prediction bounds,
+calibration, model checkpoints, cadence, solver settings and motion limits stay
+unchanged. No timed-out prediction is replayed; synthetic preparation results are
+discarded. Native progress and `sdk_full_preparation` timing describe the wait.
