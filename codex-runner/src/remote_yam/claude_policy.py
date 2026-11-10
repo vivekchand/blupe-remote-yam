@@ -177,10 +177,15 @@ def use_claude_executor(provider, executor, *, close=None):
     from .codex_policy import CodexAdapter, use_codex_executor
     def verify_executor(**kwargs):
         events = executor(**kwargs)
-        if kwargs['model'] == FABLE_5_2 and not any(
-                event.get('type') == 'turn.completed' and event.get('resolved_model') == FABLE_5_2
-                for event in events):
-            raise FableModelMismatch('Claude service did not confirm Fable 5.2; no motion sent.')
+        if kwargs['model'] == FABLE_5_2:
+            events = list(events)
+            completions = [i for i, event in enumerate(events) if event.get('type') == 'turn.completed']
+            # The shared parser consumes the last agent message. Require it to
+            # belong to the single completion attested by the broker.
+            if (len(completions) != 1 or events[completions[0]].get('resolved_model') != FABLE_5_2
+                    or any(event.get('type') == 'item.completed' and event.get('item', {}).get('type') == 'agent_message'
+                           for event in events[completions[0]+1:])):
+                raise FableModelMismatch('Claude service did not confirm Fable 5.2; no motion sent.')
         return events
 
     provider = use_codex_executor(provider, verify_executor, close=close)

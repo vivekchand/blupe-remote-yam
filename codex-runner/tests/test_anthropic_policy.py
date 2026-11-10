@@ -101,6 +101,16 @@ def test_fable_preserves_signed_turn_across_tool_feedback_without_logging_thinki
     assert requests[1]['messages'][1] == {'role':'assistant','content':turns}
     assert requests[1]['messages'][2]['content'][0]['tool_use_id'] == 'toolu_1'
 
+    def rejected(req, timeout):
+        assert 'private-signature' in req.data.decode()
+        body = io.BytesIO(b'{"error":{"message":"Invalid signature private-signature"}}')
+        raise HTTPError(req.full_url, 400, 'Bad Request', {}, body)
+
+    adapter._urlopen = rejected
+    with pytest.raises(RuntimeError, match='HTTP 400') as exc:
+        adapter._post_json(p)
+    assert 'private-signature' not in str(exc.value)
+
 
 @pytest.mark.parametrize('returned_model', ['claude-opus-5', None])
 def test_fable_api_never_returns_motion_on_fallback_or_missing_model(returned_model):

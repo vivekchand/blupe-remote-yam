@@ -97,6 +97,11 @@ class AnthropicAdapter(RoboCurveResponsesAdapter):
         self._assistant_turns = {}
         self._resolved_model = None
 
+    @property
+    def _include_http_error_detail(self):
+        # Errors can echo signed thinking sent with the conversation history.
+        return self.model != FABLE_5_2
+
     def public_config(self):
         config = super().public_config()
         if self.model == FABLE_5_2:

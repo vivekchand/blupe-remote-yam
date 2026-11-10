@@ -116,17 +116,24 @@ class ClaudePolicyTests(unittest.TestCase):
         from remote_yam.claude_policy import use_claude_executor
         model = 'claude-fable-5-2'
         completed = {'type':'turn.completed'}
+        message = {'type':'item.completed','item':{'type':'agent_message','text':json.dumps(decision())}}
+        later_events = []
         def execute(**kwargs):
             self.assertEqual(kwargs['model'], model)
             return [{'type':'thread.started','thread_id':SESSION},
-                    {'type':'item.completed','item':{'type':'agent_message','text':json.dumps(decision())}},
-                    completed]
+                    message, completed, *later_events]
         provider = use_claude_executor(AnthropicAdapter('placeholder', model), execute)
         self.addCleanup(provider.close_transport)
         with self.assertRaisesRegex(RuntimeError, 'service did not confirm Fable'):
             provider._post_json(payload())
         self.assertIsNone(provider.public_config()['resolved_model'])
         completed['resolved_model'] = model
+        for suffix in ([message], [message, {'type':'turn.completed','resolved_model':'claude-opus-5-5'}]):
+            later_events[:] = suffix
+            with self.assertRaisesRegex(RuntimeError, 'service did not confirm Fable'):
+                provider._post_json(payload())
+        self.assertIsNone(provider.public_config()['resolved_model'])
+        later_events.clear()
         self.assertEqual(provider._post_json(payload())['model'], model)
         self.assertEqual(provider.public_config()['resolved_model'], model)
 
