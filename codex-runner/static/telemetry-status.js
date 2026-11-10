@@ -330,7 +330,10 @@
         recording_run_id: shared && matchesOwn ? id(object(state.interactions).run_id) : null,
         session_id: matchesOwn ? id(state.session_id) : null},
       run: {present: !!(id(displayed.attempt_id) || id(displayed.run_id) || id(displayed.episode_id)),
-        task: text(run.task), model: text(run.model_name, 120), status: ownedPhase || (sameDisplayed && phase.includes(candidate.status) ? candidate.status : null)},
+        task: text(run.task), model: text(run.model_name, 120), status: ownedPhase || (sameDisplayed && phase.includes(candidate.status) ? candidate.status : null),
+        ...(sameDisplayed && candidate.status === 'preparing' && candidate.preparation_before_queue === true
+          && candidate.session_id == null && candidate.episode_id == null && candidate.run_started_at == null
+          ? {preparation_before_queue:true} : {})},
       events: shared ? events(run.events) : [],
       // Motion is published for every run on the station, so it is not behind
       // `shared`. It carries no task text, note, prompt or tool argument.

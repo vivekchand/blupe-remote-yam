@@ -1148,6 +1148,9 @@ class HostedRunner:
                     'runner_name': attribution['name'], 'task': attribution['task'],
                     'launch_requested_at': attribution['launch_requested_at'],
                     'status': current['status'], 'events': events, 'error': public_run_error(current),
+                    **({'preparation_before_queue': True} if current['status'] == 'preparing'
+                       and not current.get('session_id') and not current.get('episode_id')
+                       and (current.get('provider') or {}).get('preparation_before_queue') is True else {}),
                     'step_timings': current.get('step_timings', []),
                     'run_metrics': current.get('run_metrics'),
                     'episode_id': current.get('episode_id'),

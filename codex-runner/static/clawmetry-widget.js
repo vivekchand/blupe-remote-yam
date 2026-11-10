@@ -214,6 +214,8 @@
       timed_out:['Run timed out','The session deadline ended the run. This is not a task-success verdict.'],
     };
     let state = states[view?.run?.status];
+    if (view?.run?.status === 'preparing' && view.run.preparation_before_queue === true)
+      state = ['Preparing model','Preparing trajectory solvers before joining the robot queue. The run timer has not started.'];
     const hold=view?.trust?.schema==='clawmetry.trust.v1' ? view.trust.launch_hold : null;
     if(!options.currentRunOnly&&hold?.state==='held'&&['unsupported_policy','unapplied_policy','owner_changed'].includes(hold.reason))state=['Next run held for review','Review or replace the requested rules before the next Run. This does not stop or change an active run.'];
     if (options.disconnected) state = states.disconnected;

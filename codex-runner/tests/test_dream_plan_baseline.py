@@ -24,7 +24,7 @@ def dream_case(tmp_path, callback=lambda *args: {'decision': 'allow'}):
     provider._prompt = provider._task_prompt = 'Inert fixture'
     provider.observation_source = lambda: copy.deepcopy(api.fresh)
 
-    def ticks(*args):
+    def ticks(*args, **kwargs):
         if len(args) > 1 and args[1] is not None and api.fresh['observed_at'] < args[1]:
             api.fresh['observed_at'] = max(time.time(), args[1] + .0001)
         tick = provider._capture_tick()
@@ -43,6 +43,59 @@ def test_capture_keeps_raw_hardware_fields_between_packet_contexts(tmp_path):
     api, _, provider, _, _ = dream_case(tmp_path)
     assert provider._plan_context is None
     assert provider._capture_tick()['raw_baseline']['observed_at'] == api.stamp
+
+
+@pytest.mark.parametrize('expire_during', ['conversion', 'limiter'])
+def test_feedback_expiring_during_local_processing_is_reacquired_without_reprediction(tmp_path, monkeypatch, expire_during):
+    import remote_yam.dream_policy as policy
+    api, _, provider, _, dispatch = dream_case(tmp_path)
+    clock = [api.stamp]
+    monkeypatch.setattr(time, 'time', lambda: clock[0])
+    expired = []
+    def expire():
+        if expired:return
+        expired.append(True)
+        clock[0] += 6
+        api.fresh['observed_at'] = clock[0]
+        api.fresh['left_joints_deg'][0] = .8
+    evidence = provider._observe_evidence
+    def observe(stage, *args):
+        if stage == 'nominal_waypoints' and expire_during == 'conversion':expire()
+        return evidence(stage, *args)
+    provider._observe_evidence = observe
+    limit = policy.motion_limited_waypoints
+    def limited(*args, **kwargs):
+        result = limit(*args, **kwargs)
+        if expire_during == 'limiter':expire()
+        return result
+    monkeypatch.setattr(policy, 'motion_limited_waypoints', limited)
+    dispatch()
+    assert expired and len(api.submitted) == 1
+    assert provider._pending_plan['receipt']['observation']['left_joints_deg'][0] == .8
+    assert [command for command, _ in provider._worker.calls] == ['predict']
+
+
+def test_feedback_crossing_five_second_boundary_inside_wait_requires_new_sample(tmp_path, monkeypatch):
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, _, _ = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    tick=provider._capture_tick();tick['capture_generation']=0
+    provider._history.append(tick)
+    calls=[]
+    def clock():
+        calls.append(True)
+        return api.stamp + (4.99 if len(calls)==1 else 5.01)
+    monkeypatch.setattr(time,'time',clock)
+    def publish(timeout):
+        fresh=copy.deepcopy(tick)
+        fresh['observed_at']=fresh['raw_baseline']['observed_at']=api.stamp+5
+        fresh['raw_baseline']['left_joints_deg'][0]=.8
+        provider._history.append(fresh)
+    monkeypatch.setattr(provider._changed,'wait',publish)
+    selected=provider._wait_for_ticks(None,api.stamp,0)[-1]
+    assert selected['raw_baseline']['left_joints_deg'][0]==.8
+    assert not api.submitted
 
 
 @pytest.mark.parametrize('late_sample', ['moving', 'before_completion', 'clock_regressed'])
@@ -410,8 +463,8 @@ def test_optional_baseline_failure_is_closed_and_does_not_publish_exception_text
 def test_reset_requires_new_generation_and_newer_source_before_another_prediction(tmp_path,bad_input):
     api,_,provider,_,dispatch=dream_case(tmp_path)
     ticks=provider._wait_for_ticks
-    def stale(*args):
-        result=ticks(*args)
+    def stale(*args, **kwargs):
+        result=ticks(*args, **kwargs)
         if any(command=='reset' for command,_ in provider._worker.calls):
             if bad_input=='old_generation':result[-1]['capture_generation']=0
             else:result[-1]['observed_at']=api.stamp-1.

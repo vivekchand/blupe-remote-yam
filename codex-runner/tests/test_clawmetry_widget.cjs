@@ -1072,3 +1072,24 @@ test('local request refusal never presents previous run moves as current activit
   window.listeners['yam:run-cleared']({detail:{}});
   assert.equal(dom.getElementById('cm-recent-events').hidden,false);
 });
+
+test('matching prequeue preparation says model setup without claiming robot Home or elapsed run time',()=>{
+  const raw=state();Object.assign(raw.public_run,{status:'preparing',episode_id:null,preparation_before_queue:true});
+  const view=project(raw);
+  assert.equal(view.run.preparation_before_queue,true);
+  assert.equal(widget.runSummary(view).title,'Preparing model');
+  assert.match(widget.runSummary(view).detail,/run timer has not started/);
+  raw.telemetry.public_run_shared=false;
+  const privateView=project(raw);
+  assert.equal(privateView.run.preparation_before_queue,true);
+  assert.equal(privateView.run.task,null);
+  assert.equal(privateView.run.model,null);
+  for(const change of [{preparation_before_queue:false},{preparation_before_queue:'true'},{episode_id:'episode_1'},
+    {session_id:'session_1'},{run_started_at:100},{status:'running'}]){
+    const altered=structuredClone(raw);Object.assign(altered.public_run,change);
+    assert.equal(project(altered).run.preparation_before_queue,undefined);
+  }
+  assert.equal(project(raw,103,{attempt_id:'other',episode_id:null}).run.preparation_before_queue,undefined);
+  delete raw.public_run.preparation_before_queue;
+  assert.equal(widget.runSummary(project(raw)).title,'Preparing the robot');
+});

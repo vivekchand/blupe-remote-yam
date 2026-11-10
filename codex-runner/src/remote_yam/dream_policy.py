@@ -17,7 +17,8 @@ from .cadence import trajectory_cadence
 from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
 from .latency_spans import journal_span
 from .trajectory_provenance import (make_receipt, measured_baseline, packet_digest,
-                                    source_context, validate_receipt, finite, MovingMeasuredBaseline)
+                                    source_context, validate_receipt, finite, MovingMeasuredBaseline,
+                                    ExpiredMeasuredBaseline)
 
 MODELS = {'dream': ('dreamlabs/dream-1-beta', 'Dream-1 beta'),
           'dream_flash': ('dreamlabs/dream-1-beta-flash', 'Dream-1 beta Flash')}
@@ -720,8 +721,9 @@ class DreamAdapter:
                 return
             self._stop.wait(max(0, .2 - (time.monotonic() - started)))
 
-    def _wait_for_ticks(self, not_before=None, observed_after=None, limiter_generation=None):
-        deadline = time.monotonic() + OBSERVATION_RECOVERY_S
+    def _wait_for_ticks(self, not_before=None, observed_after=None, limiter_generation=None, *, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + OBSERVATION_RECOVERY_S
         waiting = False
         with self._changed:
             while True:
@@ -747,7 +749,7 @@ class DreamAdapter:
                             raise RuntimeError('Dream limiter capture generation changed')
                         try:
                             measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
-                        except MovingMeasuredBaseline:
+                        except (MovingMeasuredBaseline, ExpiredMeasuredBaseline):
                             pass
                         else:
                             if waiting:
@@ -960,9 +962,11 @@ class DreamAdapter:
                     # Keep the SDK's rolling motion history. Only the limiter
                     # baseline must follow this reconciled completion watermark.
                     limiter_after = observation['observed_at']
+                    limiter_deadline = time.monotonic() + OBSERVATION_RECOVERY_S
                     if observed_after is not None:
                         limiter_after = max(limiter_after, observed_after)
-                    latest = self._wait_for_ticks(None, limiter_after, prediction_generation)[-1]
+                    latest = self._wait_for_ticks(None, limiter_after, prediction_generation,
+                                                  deadline=limiter_deadline)[-1]
                 else:
                     latest = self._wait_for_ticks()[-1]
                 if self.steering.pending():
@@ -991,9 +995,27 @@ class DreamAdapter:
                             for side in ('left', 'right')}
                 baseline.update({side+'_gripper': measured['state.'+side+'_gripper'][0] for side in ('left','right')})
                 if self._plan_context is not None:
-                    baseline = measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
-                points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands,
-                                                  cadence_hz=self.trajectory_cadence_hz)
+                    # Conversion/evidence collection and scheduling can outlive
+                    # a tick that was fresh when the earlier wait returned.
+                    # Requalify at use, and only reacquire feedback: never call
+                    # the model again or repeat an accepted motion packet.
+                    while True:
+                        latest = self._wait_for_ticks(None, limiter_after, prediction_generation,
+                                                      deadline=limiter_deadline)[-1]
+                        try:
+                            baseline = measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
+                            points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg,
+                                max_commands=self._max_commands, cadence_hz=self.trajectory_cadence_hz)
+                            measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
+                        except ExpiredMeasuredBaseline:
+                            limiter_after = math.nextafter(latest['observed_at'], math.inf)
+                            continue
+                        if time.monotonic() >= limiter_deadline:
+                            raise RuntimeError('Dream limiter requires fresh settled hardware feedback; packet refused')
+                        break
+                else:
+                    points = motion_limited_waypoints(nominal, baseline, self.effective_joint_step_deg, max_commands=self._max_commands,
+                                                      cadence_hz=self.trajectory_cadence_hz)
                 if self._plan_context is not None:
                     with self._changed:
                         generation = latest.get('capture_generation')

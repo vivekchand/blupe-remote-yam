@@ -17,6 +17,10 @@ class MovingMeasuredBaseline(ValueError):
     """A well-formed, safe source sample still reports ordinary execution."""
 
 
+class ExpiredMeasuredBaseline(ValueError):
+    """A settled, otherwise valid hardware sample aged out before use."""
+
+
 def finite(value):
     try:
         return type(value) in (int, float) and math.isfinite(value)
@@ -85,9 +89,11 @@ def measured_baseline(value, robot_id, *, now=None):
             raise MovingMeasuredBaseline('Packet measured source is still moving')
         raise ValueError('Invalid packet measured source')
     if now is not None:
-        if (not finite(now) or not -2 <= now-result['observed_at'] <= 5
-                or feedback_decision(result, result, now=now)[0] != 'ready'):
+        if (not finite(now) or now-result['observed_at'] < -2
+                or feedback_decision(result, result, now=result['observed_at'])[0] != 'ready'):
             raise ValueError('Packet measured baseline is unavailable or stale')
+        if now-result['observed_at'] > 5:
+            raise ExpiredMeasuredBaseline('Packet measured baseline expired before use')
     return result
 
 
