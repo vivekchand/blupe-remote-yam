@@ -13,6 +13,10 @@ SOURCE_KEYS = ('plan_id', 'attempt_id', 'session_id', 'episode_id', 'lease_id', 
                'api_origin', 'api_identity', 'first_step_id', 'cadence_hz')
 
 
+class MovingMeasuredBaseline(ValueError):
+    """A well-formed, safe source sample still reports ordinary execution."""
+
+
 def finite(value):
     try:
         return type(value) in (int, float) and math.isfinite(value)
@@ -54,7 +58,6 @@ def measured_baseline(value, robot_id, *, now=None):
     """Copy only raw station fields, never a model state or fabricated clock."""
     if (not isinstance(value, Mapping) or value.get('jetson_id') != robot_id
             or value.get('robot_id', robot_id) != robot_id or value.get('source') != 'hardware'
-            or value.get('settled') is not True or value.get('mode') in ('EXECUTING', 'HOMING')
             or not finite(value.get('observed_at'))):
         raise ValueError('Invalid packet measured source')
     if ((value.get('homed') is not None and type(value['homed']) is not bool)
@@ -75,6 +78,12 @@ def measured_baseline(value, robot_id, *, now=None):
                 or not all(finite(number) for number in joints) or not finite(grip) or not 0 <= grip <= 1):
             raise ValueError('Invalid measured joint or gripper feedback')
         result[side+'_joints_deg'], result[side+'_gripper'] = list(joints), grip
+    if value.get('settled') is not True or value.get('mode') in ('EXECUTING', 'HOMING'):
+        if (value.get('settled') is False and value.get('mode') in ('EXECUTING', 'API_ACTIVE')
+                and safety.get('ok') is True and safety.get('estop_engaged') is False
+                and now is not None and finite(now) and -2 <= now-result['observed_at'] <= 5):
+            raise MovingMeasuredBaseline('Packet measured source is still moving')
+        raise ValueError('Invalid packet measured source')
     if now is not None:
         if (not finite(now) or not -2 <= now-result['observed_at'] <= 5
                 or feedback_decision(result, result, now=now)[0] != 'ready'):

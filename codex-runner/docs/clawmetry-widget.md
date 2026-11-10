@@ -246,3 +246,27 @@ task. Hosted acceptance must separately run `place the red block on grey plate`
 with the same robot, Dream checkpoint and duration on both playgrounds, preserving
 run IDs, starting-scene evidence and recordings. That physical comparison remains
 unverified by these source tests.
+
+### Settled limiter capture selection
+
+The first hosted trial of the admission fix accepted two packets, then stopped
+with `Invalid packet measured source`. Collection runs during motion: a tick's
+monotonic timestamp marks the end of camera capture, while its encoder/status
+read happens earlier. Finishing capture after completion does not establish that
+the raw pose was read after completion.
+
+Installed Dream predictions now retain the reconciled completion's robot-clock
+watermark. The limiter waits at most five seconds for the newest tick itself to
+be at or after that watermark, fresh, safe and explicitly settled, in the same
+capture generation as the prediction. It never searches backward for an older
+idle pose. Ordinary safe execution samples can wait for a newer settled sample;
+malformed identity, unsafe feedback, Home, generation retirement and cancellation
+remain terminal. A wait emits native progress and does not replay a prediction or
+movement. Hardware capture retains its raw fields even between packet contexts.
+The SDK's rolling motion/image history remains intact; this completion watermark
+qualifies the limiter input separately from the model input window.
+
+Real condition-variable regression fixtures cover a capture finishing late,
+source-clock regression, settling, generation retirement, cancellation, bounded
+timeout and malformed/unsafe moving samples. Physical task acceptance remains a
+separate requirement after deployment.

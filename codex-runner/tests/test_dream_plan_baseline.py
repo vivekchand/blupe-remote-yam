@@ -25,7 +25,7 @@ def dream_case(tmp_path, callback=lambda *args: {'decision': 'allow'}):
     provider.observation_source = lambda: copy.deepcopy(api.fresh)
 
     def ticks(*args):
-        if len(args) > 1 and args[1] is not None:
+        if len(args) > 1 and args[1] is not None and api.fresh['observed_at'] < args[1]:
             api.fresh['observed_at'] = max(time.time(), args[1] + .0001)
         tick = provider._capture_tick()
         tick['capture_generation'] = provider._history_generation
@@ -37,6 +37,120 @@ def dream_case(tmp_path, callback=lambda *args: {'decision': 'allow'}):
         return controller._dispatch_trajectory(provider.build_trajectory, provider,
             'Inert fixture', planning, 'guard-session', 'guard-episode', 'PRIVATE-LEASE', 42)
     return api, controller, provider, planning, dispatch
+
+
+def test_capture_keeps_raw_hardware_fields_between_packet_contexts(tmp_path):
+    api, _, provider, _, _ = dream_case(tmp_path)
+    assert provider._plan_context is None
+    assert provider._capture_tick()['raw_baseline']['observed_at'] == api.stamp
+
+
+@pytest.mark.parametrize('late_sample', ['moving', 'before_completion', 'clock_regressed'])
+def test_real_limiter_waits_for_latest_source_current_settled_tick(tmp_path, late_sample):
+    import threading
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, planning, dispatch = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    initial = provider._capture_tick()
+    initial.update(capture_generation=0, timestamp=time.monotonic()+10)
+    motion_history = copy.deepcopy(initial)
+    motion_history['observed_at'] = planning['observed_at']-1
+    motion_history['raw_baseline'].update(settled=False, mode='EXECUTING')
+    provider._history.append(motion_history)
+    provider._history.append(initial)
+    waiting = threading.Event()
+    provider.interaction_sink = lambda kind, message, **kw: waiting.set() if 'waiting for settled' in message else None
+    call = provider._worker.call
+    def predict(command, **kwargs):
+        answer = call(command, **kwargs)
+        if command == 'predict':
+            assert kwargs['ticks'][0]['observed_at'] == motion_history['observed_at']
+            late = copy.deepcopy(initial)
+            if late_sample == 'moving':
+                late['raw_baseline'].update(settled=False, mode='EXECUTING')
+            else:
+                late['observed_at'] = planning['observed_at']-.1
+                late['raw_baseline']['observed_at'] = late['observed_at']
+            with provider._changed:
+                if late_sample != 'clock_regressed':
+                    provider._history.clear()
+                provider._history.append(late)
+        return answer
+    provider._worker.call = predict
+    def publish():
+        assert waiting.wait(2)
+        assert not api.submitted
+        api.fresh['left_joints_deg'][0] = .8
+        api.fresh['observed_at'] += .001
+        tick = provider._capture_tick()
+        tick['capture_generation'] = 0
+        with provider._changed:
+            provider._history.append(tick)
+            provider._changed.notify_all()
+    thread = threading.Thread(target=publish)
+    thread.start()
+    try:
+        dispatch()
+        assert len(api.submitted) == 1
+        assert provider._pending_plan['receipt']['observation']['left_joints_deg'][0] == .8
+        assert [name for name, _ in provider._worker.calls] == ['predict']
+    finally:
+        thread.join(3)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize('change', ['generation', 'stop', 'timeout'])
+def test_settled_limiter_wait_is_bounded_and_cannot_survive_retirement(tmp_path, monkeypatch, change):
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, _, _ = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    api.fresh.update(settled=False, mode='EXECUTING')
+    tick = provider._capture_tick(); tick['capture_generation'] = 0
+    provider._history.append(tick)
+    def wait(timeout):
+        if change == 'generation': provider._history_generation += 1
+        elif change == 'stop': provider._stop.set()
+    monkeypatch.setattr(provider._changed, 'wait', wait)
+    if change == 'timeout':
+        clock = iter((0., 0., 6.))
+        monkeypatch.setattr(time, 'monotonic', lambda: next(clock))
+    with pytest.raises(RuntimeError, match={'generation':'capture generation', 'stop':'cancelled', 'timeout':'fresh settled'}[change]):
+        provider._wait_for_ticks(None, api.stamp, 0)
+    assert not api.submitted and not provider._worker.calls
+
+
+@pytest.mark.parametrize('field,value', [
+    ('jetson_id','foreign'), ('source','simulation'), ('settled',None), ('mode','HOMING'),
+    ('mode','FAULT'), ('left_joints_deg',[float('nan')]*6), ('left_gripper',True),
+    ('safety',dict(ok=False,estop_engaged=False)), ('safety',dict(ok=True,estop_engaged=True)),
+])
+def test_malformed_or_unsafe_moving_sample_is_not_treated_as_a_settling_wait(tmp_path, field, value):
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, _, _ = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    api.fresh.update(settled=False, mode='EXECUTING')
+    tick = provider._capture_tick();tick['capture_generation'] = 0
+    tick['raw_baseline'][field] = value
+    provider._history.append(tick)
+    with pytest.raises(ValueError):provider._wait_for_ticks(None, api.stamp, 0)
+    assert not api.submitted and not provider._worker.calls
+
+
+def test_settled_tick_cannot_be_admitted_after_the_limiter_wait_deadline(tmp_path, monkeypatch):
+    from types import MethodType
+    from remote_yam.dream_policy import DreamAdapter
+    api, _, provider, _, _ = dream_case(tmp_path)
+    provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
+    tick=provider._capture_tick();tick['capture_generation']=0
+    provider._history.append(tick)
+    clock=iter((0.,6.))
+    monkeypatch.setattr(time,'monotonic',lambda:next(clock))
+    with pytest.raises(RuntimeError,match='fresh settled'):
+        provider._wait_for_ticks(None,api.stamp,0)
+    assert not api.submitted
 
 
 def test_real_dream_packet_uses_its_actual_limiter_baseline_not_call_entry(tmp_path):
