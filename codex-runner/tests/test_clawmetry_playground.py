@@ -101,6 +101,32 @@ def session(app):
     return browser
 
 
+@pytest.mark.parametrize('cls,default', [(LocalPlayground, 120), (ClawMetryPlayground, 300)])
+@pytest.mark.parametrize('provider', ['dream', 'dream_flash'])
+@pytest.mark.parametrize('explicit', [None, 120])
+def test_clawmetry_dream_five_minute_default_reaches_queue(app_factory, tmp_path, cls, default, provider, explicit):
+    credentials = tmp_path / 'inert-dream-credentials'
+    credentials.write_text('inert fixture, no provider connection')
+    app, api, _ = app_factory(cls, dream_credentials_file=str(credentials), dream_python=sys.executable)
+    # Keep the actual configured metadata and launch validation, with an inert
+    # adapter and a queue that never grants control. No SDK or robot connection.
+    app.extra_providers[provider] = lambda model, directory: ScriptedAdapter([])
+    code, metadata, _, _ = call(app, '/api/session', {})
+    assert code == 200
+    visitor = next(iter(app.visitors.values()))
+    assert metadata['dream_providers'][provider]['default_run_duration_s'] == default
+    payload = dict(provider=provider, model=app.dream_providers[provider]['model'],
+                   prompt='Duration fixture only', runner_name='Duration fixture')
+    if explicit is not None:
+        payload['run_duration_s'] = explicit
+    original = dict(payload)
+    app.launch(visitor, payload)
+    assert visitor.controller.status()['run_duration_s'] == (explicit or default)
+    assert api.create_requests[0].get('run_duration_s', 300) == (explicit or default)
+    assert payload == original
+    assert api.action_log == []
+
+
 def test_composition_preserves_existing_hosted_product_hooks(app_factory):
     class Product(LocalPlayground):
         def page(self):

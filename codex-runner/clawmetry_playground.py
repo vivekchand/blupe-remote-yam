@@ -45,6 +45,17 @@ class ClawMetryMixin:
 
     _motion_cache = None
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for provider in self.dream_providers.values():
+            provider['default_run_duration_s'] = 300
+
+    def launch(self, visitor, payload, **kwargs):
+        if payload.get('provider') in ('dream', 'dream_flash'):
+            payload = dict(payload)
+            payload.setdefault('run_duration_s', 300)
+        return super().launch(visitor, payload, **kwargs)
+
     def telemetry_secrets(self, visitor):
         """Supply known in-memory secrets to the optional private recorder."""
         return _secrets(visitor)
