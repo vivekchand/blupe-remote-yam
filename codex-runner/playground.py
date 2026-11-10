@@ -171,6 +171,8 @@ class Visitor:
     runner_task: str = ""
     runner_name: str = "Anonymous"
     runner_session_id: str | None = None
+    runner_binding: dict | None = field(default=None, repr=False)
+    pending_runner_contacts: dict = field(default_factory=dict, repr=False)
     episode_ids: set[str] = field(default_factory=set)
     public_episode_consent: dict[str, bool] = field(default_factory=dict, repr=False)
     launches: int = 0
@@ -208,7 +210,9 @@ class HostedRunner:
                  max_sessions: int = 32, idle_seconds: float = 1800,
                  lifetime_seconds: float = 7200, api_factory=None,
                  provider_factory=None, api_depth_provider_factory=None, use_api_depth=False, extra_providers=None, chat_database=None, share_conversation=True,
-                 groot_key_file="", groot_config=None, runpod_key_file="", runpod_config=None, dream_credentials_file="", dream_python="", dream_worker_pool=None, dream_worker_factory=None, dream_worker_ready=None, local_codex=False, local_claude=False, default_provider="openai", robots=None, robot_id="yam-1", camera_names=CAMERA_NAMES, joint_counts=(6,6), hardware=None, policy_camera_names=None, recording_root=None, operator_status_origin=None):
+                 groot_key_file="", groot_config=None, runpod_key_file="", runpod_config=None, dream_credentials_file="", dream_python="", dream_worker_pool=None, dream_worker_factory=None, dream_worker_ready=None, dream_prepare_before_queue=False, local_codex=False, local_claude=False, default_provider="openai", robots=None, robot_id="yam-1", camera_names=CAMERA_NAMES, joint_counts=(6,6), hardware=None, policy_camera_names=None, recording_root=None, operator_status_origin=None):
+        if type(dream_prepare_before_queue) is not bool:
+            raise ValueError('Dream preparation mode must be true or false')
         parsed = urlsplit(public_origin)
         if (not parsed.hostname or parsed.path not in {"", "/"} or parsed.query
                 or parsed.fragment or parsed.username or parsed.password):
@@ -331,10 +335,11 @@ class HostedRunner:
                         gateway_max_step_deg=gateway_step,
                         worker_pool=dream_worker_pool,
                         worker_factory=dream_worker_factory or DreamWorker,
-                        robot_id=self.robot_id)
+                        robot_id=self.robot_id, prepare_before_queue=dream_prepare_before_queue)
                 self.extra_providers[name] = factory
                 self.dream_providers[name] = {'label': label, 'model': checkpoint,
                     'default_run_duration_s': 120, 'max_run_duration_s': 1200,
+                    **({'preparation_before_queue': True} if dream_prepare_before_queue else {}),
                     'motion_cap': {'default_step_deg': 20, 'gateway_step_deg': gateway_step},
                     'help': 'Dream-1 follows your instruction using the overhead and wrist cameras. Runs until the time limit or Stop.'}
         self.observation = None
@@ -413,24 +418,62 @@ class HostedRunner:
     def page(self):
         return (ROOT / "static/hosted.html").read_bytes()
 
+    def runner_attribution(self, visitor, state):
+        """Detach attribution from one accepted attempt, including deferred admission."""
+        with visitor.controller._lock:
+            binding = visitor.runner_binding
+            if binding is not None:
+                if (state.get('attempt_id') != binding['attempt_id']
+                        or state.get('attempt_id') != visitor.controller._attempt_id):
+                    return None
+                if state.get('session_id'):
+                    visitor.runner_session_id = state['session_id']
+                    pending = visitor.pending_runner_contacts.get(binding['attempt_id'])
+                    if pending is not None:
+                        pending['session_id'] = state['session_id']
+                elif state.get('status') not in ACTIVE:
+                    visitor.pending_runner_contacts.pop(binding['attempt_id'], None)
+                return {**binding, 'session_id': visitor.runner_session_id}
+            # Compatibility for existing synchronous/manual hosting integrations.
+            return dict(task=visitor.runner_task, name=visitor.runner_name,
+                        session_id=visitor.runner_session_id,
+                        launch_requested_at=visitor.launch_requested_at,
+                        last_launch=visitor.last_launch)
+
+    def flush_runner_contacts(self, visitor):
+        """Persist detached private contacts from background maintenance only."""
+        with visitor.controller._lock:
+            ready = []
+            for attempt, pending in tuple(visitor.pending_runner_contacts.items()):
+                if pending.get('session_id'):
+                    ready.append(visitor.pending_runner_contacts.pop(attempt))
+        for pending in ready:
+            try:
+                save_handles(self.social_database, pending['session_id'], pending['name'], pending['handles'])
+            except Exception as exc:
+                print('[contacts] deferred_save_failed error_type=' + type(exc).__name__, flush=True)
+
     def remember_runner(self, visitor):
         state = visitor.controller.status()
+        attribution = self.runner_attribution(visitor, state)
+        if attribution is None:
+            return
         eid = state.get('episode_id')
-        if eid and visitor.runner_session_id and state.get('session_id') == visitor.runner_session_id:
+        if eid and attribution['session_id'] and state.get('session_id') == attribution['session_id']:
             visitor.episode_ids.add(eid)
             # Keep source-bound consent for the native allowance's 20 runs.
             # Older known episodes remain owned but default to no public text.
             if eid in visitor.public_episode_consent or len(visitor.public_episode_consent) < 20:
                 visitor.public_episode_consent[eid] = state.get('source_conversation_shared') is True
             try:
-                self.run_names.remember_metadata(eid, self.robot_id, visitor.runner_task, state.get("run_started_at"), state.get("run_configuration"))
+                self.run_names.remember_metadata(eid, self.robot_id, attribution['task'], state.get("run_started_at"), state.get("run_configuration"))
                 self.run_names.remember_result(eid, state)
             except (OSError, sqlite3.Error):
                 pass
-        if eid and eid not in self.remembered_names and state.get('session_id') == visitor.runner_session_id:
+        if eid and eid not in self.remembered_names and state.get('session_id') == attribution['session_id']:
             # History storage must never prevent Stop or other robot controls.
             try:
-                self.run_names.remember(eid, visitor.runner_name)
+                self.run_names.remember(eid, attribution['name'])
             except (OSError, sqlite3.Error):
                 return
             self.remembered_names.add(eid)
@@ -446,8 +489,11 @@ class HostedRunner:
     def remember_assessment_owner(self, visitor):
         """Run in maintenance/read paths; never add overlay I/O before Stop."""
         state = visitor.controller.status()
+        attribution = self.runner_attribution(visitor, state)
+        if attribution is None:
+            return
         eid = state.get('episode_id')
-        if eid and visitor.runner_session_id and state.get('session_id') == visitor.runner_session_id:
+        if eid and attribution['session_id'] and state.get('session_id') == attribution['session_id']:
             self.run_assessments.register(eid, visitor.assessment_session, self.assessment_user(visitor),
                 ended=state.get('status') not in ACTIVE | {'idle'})
 
@@ -516,6 +562,8 @@ class HostedRunner:
                 with suppress(Exception):
                     await asyncio.to_thread(self.remember_runner, visitor)
                     await asyncio.to_thread(self.remember_assessment_owner, visitor)
+                    if visitor.pending_runner_contacts:
+                        await asyncio.to_thread(self.flush_runner_contacts, visitor)
             now = time.monotonic()
             expired = [key for key, item in self.visitors.items()
                        if now - item.touched > self.idle_seconds or now - item.born > self.lifetime_seconds]
@@ -1063,28 +1111,31 @@ class HostedRunner:
             station_episode = station_run.get('run_id')
             for other in list(self.visitors.values()):
                 current = other.controller.status()
+                attribution = self.runner_attribution(other, current)
+                owned_attempt = attribution is not None
                 other.controller.retain_public_secrets(tuple(other.saved_keys.values()))
-                if current.get('episode_id'):
+                if owned_attempt and current.get('episode_id'):
                     public_episodes[current['episode_id']] = (
                         other.public_redactor, current.get('source_conversation_shared') is True)
                 if station_episode and station_episode in other.episode_ids and station_episode != current.get('episode_id'):
                     public_episodes[station_episode] = (
                         other.public_redactor, other.public_episode_consent.get(station_episode) is True)
-                public_labels = public_run_copy({'runner_name': other.runner_name,
-                    'task': other.runner_task, 'status': current['status']}, other.public_redactor)
-                if other.runner_session_id:
-                    public_owners[other.runner_session_id] = (
+                public_labels = public_run_copy({'runner_name': (attribution or {}).get('name'),
+                    'task': (attribution or {}).get('task'), 'status': current['status']}, other.public_redactor)
+                if owned_attempt and attribution['session_id']:
+                    public_owners[attribution['session_id']] = (
                         public_labels.get('runner_name', 'Anonymous'), other.public_redactor)
                 running = current.get('status') in {'preparing', 'running'}
-                if running:
+                if running and owned_attempt:
                     state['whats_running'].append({key: public_labels.get(key)
                         for key in ('runner_name', 'task', 'status')})
-                if (other.runner_session_id or (other.runner_task and
-                        ((current.get('provider') or {}).get('task_progress') or (current.get('provider') or {}).get('managed_execution')))) and current.get('status') != 'queued':
-                    candidates.append((running, other.last_launch, other, current))
+                if owned_attempt and (attribution['session_id'] or (attribution['task'] and
+                        ((current.get('provider') or {}).get('task_progress') or (current.get('provider') or {}).get('managed_execution')
+                         or (current.get('provider') or {}).get('preparation_before_queue')))) and current.get('status') != 'queued':
+                    candidates.append((running, attribution['last_launch'], other, current, attribution))
             state['public_run'] = None
             if candidates:
-                _, _, owner, current = max(candidates, key=lambda item: item[:2])
+                _, _, owner, current, attribution = max(candidates, key=lambda item: item[:2])
                 from remote_yam.public_conversation import project_events
                 from remote_yam.run_errors import public_run_error
                 from remote_yam.past_runs import public_robot_error
@@ -1094,8 +1145,8 @@ class HostedRunner:
                 state['public_run'] = public_run_copy({'run_id': (current.get('interactions') or {}).get('run_id'),
                     'source_conversation_shared': source_shared,
                     'attempt_id': current.get('source_conversation_attempt_id'),
-                    'runner_name': owner.runner_name, 'task': owner.runner_task,
-                    'launch_requested_at': owner.launch_requested_at,
+                    'runner_name': attribution['name'], 'task': attribution['task'],
+                    'launch_requested_at': attribution['launch_requested_at'],
                     'status': current['status'], 'events': events, 'error': public_run_error(current),
                     'step_timings': current.get('step_timings', []),
                     'run_metrics': current.get('run_metrics'),
@@ -1483,9 +1534,17 @@ class HostedRunner:
                     analytics_run = getattr(visitor.controller, "_analytics_run", None)
                     if analytics_run:
                         analytics_run["run_route"] = "paid" if paid else "direct"
-                visitor.runner_task = prompt.strip()
-                visitor.runner_name = runner_name.strip()
-                visitor.runner_session_id = visitor.controller.status().get('session_id')
+                with visitor.controller._lock:
+                    submitted = visitor.controller.status()
+                    visitor.runner_task = prompt.strip()
+                    visitor.runner_name = runner_name.strip()
+                    visitor.runner_session_id = submitted.get('session_id')
+                    visitor.runner_binding = dict(attempt_id=submitted.get('attempt_id'),
+                        task=visitor.runner_task, name=visitor.runner_name,
+                        launch_requested_at=visitor.launch_requested_at, last_launch=visitor.last_launch)
+                    if not visitor.runner_session_id and any(handles.values()):
+                        visitor.pending_runner_contacts[submitted['attempt_id']] = dict(
+                            name=visitor.runner_name, handles=dict(handles), session_id=None)
                 visitor.controller._interactions.add('runner', 'Run submitted by ' + visitor.runner_name, runner_name=visitor.runner_name)
             except Exception:
                 if hasattr(provider, "_api_key"):
@@ -1498,7 +1557,8 @@ class HostedRunner:
                 raise RequestError(503, "Could not join the robot queue. Please try again.") from None
             # Optional metadata must never cancel an already accepted session.
             try:
-                save_handles(self.social_database, visitor.runner_session_id, visitor.runner_name, handles)
+                if visitor.runner_session_id:
+                    save_handles(self.social_database, visitor.runner_session_id, visitor.runner_name, handles)
             except Exception as exc:
                 print('[contacts] save_failed error_type=' + type(exc).__name__, flush=True)
                 visitor.controller._session_api.note(
@@ -1507,7 +1567,9 @@ class HostedRunner:
                 visitor.saved_keys[name] = key
             current = visitor.controller.status()
             return {"ok": True, "saved_key_providers": sorted(visitor.saved_keys),
-                    "attempt_id": current.get('attempt_id'), "status": current['status']}
+                    "attempt_id": current.get('attempt_id'), "status": current['status'],
+                    "preparation_before_queue": (current.get('provider') or {}).get('preparation_before_queue') is True
+                        and not current.get('session_id')}
 
     def steer(self, visitor, payload):
         from remote_yam.steering import SteeringError

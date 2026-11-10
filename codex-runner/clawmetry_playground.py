@@ -46,6 +46,7 @@ class ClawMetryMixin:
     _motion_cache = None
 
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault('dream_prepare_before_queue', True)
         super().__init__(*args, **kwargs)
         for provider in self.dream_providers.values():
             provider['default_run_duration_s'] = 300

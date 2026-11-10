@@ -648,3 +648,156 @@ def test_unchanged_journal_is_not_reprojected_for_every_poll(app_factory, monkey
     after = asyncio.run(app.status_extension(owner, state))
     assert len(calls) == 2
     assert after['motion']['rows'][-1]['kind'] == 'packet_completed'
+
+
+@pytest.mark.parametrize('cls,enabled', [(LocalPlayground, False), (ClawMetryPlayground, True)])
+@pytest.mark.parametrize('name', ['dream', 'dream_flash'])
+def test_only_clawmetry_factory_opts_into_native_prequeue_preparation(app_factory, tmp_path, cls, enabled, name):
+    credentials = tmp_path / 'inert-dream-credentials'
+    credentials.write_text('inert fixture, never loaded')
+    app, api, _ = app_factory(cls, dream_credentials_file=str(credentials), dream_python=sys.executable)
+    policy = app.extra_providers[name](app.dream_providers[name]['model'], tmp_path / 'inert-worker')
+    try:
+        assert app.dream_providers[name].get('preparation_before_queue', False) is enabled
+        assert callable(getattr(policy, 'prepare_before_session', None)) is enabled
+        assert policy.public_config().get('preparation_before_queue', False) is enabled
+        assert not api.create_requests and policy._worker is None
+    finally:
+        policy.close_transport()
+
+
+def test_prequeue_admission_retains_public_activity_journal_identity_and_episode_owner(app_factory, tmp_path):
+    import threading
+    import time
+    from test_dream_policy import Worker
+    credentials = tmp_path/'inert-credentials'
+    credentials.write_text('synthetic only')
+    entered, release = threading.Event(), threading.Event()
+    class HeldWorker(Worker):
+        def call(self, command, **kwargs):
+            assert command == 'configure'
+            entered.set()
+            assert release.wait(3)
+            return super().call(command, **kwargs)
+    app, api, _ = app_factory(dream_credentials_file=str(credentials), dream_python=sys.executable,
+                              dream_worker_factory=HeldWorker)
+    code, _, _, browser = call(app, '/api/session', {})
+    assert code == 200
+    visitor = next(iter(app.visitors.values()))
+    # Exercise actual preparation/admission but never activate a lease/event loop.
+    visitor.controller._run_loop = lambda *args: None
+    try:
+        response = app.launch(visitor, dict(provider='dream', model=app.dream_providers['dream']['model'],
+            prompt='Inert hosted preparation fixture', runner_name='Actual fixture person',
+            email='private-fixture@example.test', x_handle='inert_fixture'))
+        assert entered.wait(1)
+        assert response['preparation_before_queue'] is True
+        assert not api.create_requests and visitor.runner_session_id is None
+        assert not app.social_database.exists()
+        code, state, _, _ = call(app, '/api/status', session=browser)
+        assert code == 200 and state['public_run']['status'] == 'preparing'
+        run_id = state['public_run']['run_id']
+        assert run_id and state['public_run']['runner_name'] == 'Actual fixture person'
+        assert 'private-fixture@example.test' not in json.dumps(state['public_run'])
+        assert 'inert_fixture' not in json.dumps(state['public_run'])
+        release.set()
+        visitor.controller._worker.join(3)
+        assert not visitor.controller._worker.is_alive()
+        sid = visitor.controller.status()['session_id']
+        assert sid and len(api.create_requests) == 1
+        with visitor.controller._lock:
+            visitor.controller._status = 'preparing'
+            visitor.controller._episode_id = 'ep_inert_hosted_prequeue'
+        app.remember_runner(visitor)
+        app.remember_assessment_owner(visitor)
+        assert visitor.runner_session_id == sid
+        assert not app.social_database.exists()  # Background-only optional contact writes.
+        app.flush_runner_contacts(visitor)
+        import sqlite3
+        with sqlite3.connect(app.social_database) as database:
+            rows = database.execute('SELECT session_id,runner_name,x_handle,email FROM run_socials').fetchall()
+        assert rows == [(sid, 'Actual fixture person', 'inert_fixture', 'private-fixture@example.test')]
+        assert not visitor.pending_runner_contacts
+        assert 'ep_inert_hosted_prequeue' in visitor.episode_ids
+        code, state, _, _ = call(app, '/api/status', session=browser)
+        assert code == 200 and state['public_run']['run_id'] == run_id
+        assert state['public_run']['runner_name'] == 'Actual fixture person'
+        assert state['public_run']['episode_id'] == 'ep_inert_hosted_prequeue'
+        app.run_assessments.assess('ep_inert_hosted_prequeue', 'Failure', 0, visitor.assessment_session)
+        assessment = app.run_assessments.detail('ep_inert_hosted_prequeue', visitor.assessment_session)
+        assert assessment['label'] == 'Failure'
+        # A replacement attempt cannot inherit the stale task/name or ownership.
+        with visitor.controller._lock:
+            visitor.controller._attempt_id = 'replacement-attempt'
+            visitor.controller._session_id = 'replacement-session'
+            visitor.controller._episode_id = 'ep_unowned_replacement'
+        app.remember_runner(visitor)
+        app.remember_assessment_owner(visitor)
+        assert visitor.runner_session_id == sid
+        assert 'ep_unowned_replacement' not in visitor.episode_ids
+        code, state, _, _ = call(app, '/api/status', session=browser)
+        assert code == 200 and state['public_run'] is None
+        assert not state['whats_running']
+        assert not api.action_log and not api.trajectory_log
+    finally:
+        release.set()
+        with visitor.controller._lock:
+            visitor.controller._session_id = locals().get('sid')
+        visitor.controller.stop()
+        provider = visitor.controller._provider
+        if provider is not None:
+            provider.close_transport()
+
+
+def test_public_activity_uses_detached_attribution_when_another_launch_interleaves(app_factory):
+    app, api, _ = app_factory()
+    code, _, _, browser = call(app, '/api/session', {})
+    assert code == 200
+    visitor = next(iter(app.visitors.values()))
+    controller = visitor.controller
+    controller._provider = ScriptedAdapter([])
+    controller._attempt_id = 'old-attempt'
+    controller._source_conversation_attempt_id = 'old-attempt'
+    controller._session_id = 'old-session'
+    controller._episode_id = 'ep_old_attribution'
+    controller._status = 'running'
+    controller._run_started_at = None
+    controller._run_duration_s = 300
+    controller._run_share_conversation = True
+    visitor.runner_session_id = 'old-session'
+    visitor.runner_binding = dict(attempt_id='old-attempt', task='Old task', name='Old runner',
+                                  last_launch=1., launch_requested_at=1.)
+    original = app.runner_attribution
+    def interleaved(owner, state):
+        snapshot = original(owner, state)
+        with controller._lock:
+            controller._attempt_id = 'new-attempt'
+            controller._session_id = 'new-session'
+            controller._episode_id = 'ep_new_attribution'
+            controller._run_share_conversation = False
+            owner.runner_name, owner.runner_task, owner.runner_session_id = 'New runner', 'New private task', 'new-session'
+            owner.runner_binding = dict(attempt_id='new-attempt', task='New private task', name='New runner',
+                                       last_launch=2., launch_requested_at=2.)
+        return snapshot
+    app.runner_attribution = interleaved
+    code, state, _, _ = call(app, '/api/status', session=browser)
+    assert code == 200
+    run = state['public_run']
+    assert run['attempt_id'] == 'old-attempt' and run['episode_id'] == 'ep_old_attribution'
+    assert run['task'] == 'Old task' and run['runner_name'] == 'Old runner'
+    assert run['source_conversation_shared'] is True
+    assert 'New private task' not in json.dumps(run)
+    assert not api.create_requests and not api.action_log
+
+
+def test_stop_never_flushes_private_pending_contacts(app_factory):
+    app, api, _ = app_factory()
+    code, _, _, browser = call(app, '/api/session', {})
+    assert code == 200
+    visitor = next(iter(app.visitors.values()))
+    visitor.pending_runner_contacts['inert-attempt'] = dict(session_id='inert-session',
+        name='Private fixture', handles={'email':'private-fixture@example.test'})
+    app.flush_runner_contacts = Mock(side_effect=AssertionError('Stop must not write contacts'))
+    code, _, _, _ = call(app, '/api/stop', {}, session=browser)
+    assert code == 200 and not app.flush_runner_contacts.called
+    assert not app.social_database.exists() and not api.action_log
