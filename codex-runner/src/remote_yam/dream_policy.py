@@ -820,7 +820,7 @@ class DreamAdapter:
             self._commanded = self._pending_commanded = None
             self._workspace_reset_pending = False
             self._workspace_feedback = None
-        observed_after = observation.get('observed_at') if self._plan_context is not None else None
+        observed_after = None
         if self._stale_plan_reset_pending:
             try:
                 reset = self._worker.call('reset', cancelled=self._cancelled)
@@ -907,8 +907,15 @@ class DreamAdapter:
                 raise RuntimeError('Dream prediction cancelled; result discarded')
             if reply['ok']:
                 # A collection failure during inference must not dispatch a late reply.
-                latest = (self._wait_for_ticks(None, observed_after, prediction_generation)[-1]
-                          if self._plan_context is not None else self._wait_for_ticks()[-1])
+                if self._plan_context is not None:
+                    # Keep the SDK's rolling motion history. Only the limiter
+                    # baseline must follow this reconciled completion watermark.
+                    limiter_after = observation['observed_at']
+                    if observed_after is not None:
+                        limiter_after = max(limiter_after, observed_after)
+                    latest = self._wait_for_ticks(None, limiter_after, prediction_generation)[-1]
+                else:
+                    latest = self._wait_for_ticks()[-1]
                 if self.steering.pending():
                     # Nothing from this prediction was dispatched. Keep the
                     # completed command anchor, or measured pose on the first

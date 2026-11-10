@@ -263,6 +263,8 @@ idle pose. Ordinary safe execution samples can wait for a newer settled sample;
 malformed identity, unsafe feedback, Home, generation retirement and cancellation
 remain terminal. A wait emits native progress and does not replay a prediction or
 movement. Hardware capture retains its raw fields even between packet contexts.
+The SDK's rolling motion/image history remains intact; this completion watermark
+qualifies the limiter input separately from the model input window.
 
 Real condition-variable regression fixtures cover a capture finishing late,
 source-clock regression, settling, generation retirement, cancellation, bounded

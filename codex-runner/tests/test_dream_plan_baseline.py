@@ -54,6 +54,10 @@ def test_real_limiter_waits_for_latest_source_current_settled_tick(tmp_path, lat
     provider._wait_for_ticks = MethodType(DreamAdapter._wait_for_ticks, provider)
     initial = provider._capture_tick()
     initial.update(capture_generation=0, timestamp=time.monotonic()+10)
+    motion_history = copy.deepcopy(initial)
+    motion_history['observed_at'] = planning['observed_at']-1
+    motion_history['raw_baseline'].update(settled=False, mode='EXECUTING')
+    provider._history.append(motion_history)
     provider._history.append(initial)
     waiting = threading.Event()
     provider.interaction_sink = lambda kind, message, **kw: waiting.set() if 'waiting for settled' in message else None
@@ -61,6 +65,7 @@ def test_real_limiter_waits_for_latest_source_current_settled_tick(tmp_path, lat
     def predict(command, **kwargs):
         answer = call(command, **kwargs)
         if command == 'predict':
+            assert kwargs['ticks'][0]['observed_at'] == motion_history['observed_at']
             late = copy.deepcopy(initial)
             if late_sample == 'moving':
                 late['raw_baseline'].update(settled=False, mode='EXECUTING')
