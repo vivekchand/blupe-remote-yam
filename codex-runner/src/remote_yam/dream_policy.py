@@ -17,7 +17,7 @@ from .cadence import trajectory_cadence
 from .session import command_budget, MAX_COMMANDS, MAX_WAYPOINTS_PER_PACKET
 from .latency_spans import journal_span
 from .trajectory_provenance import (make_receipt, measured_baseline, packet_digest,
-                                    source_context, validate_receipt, finite)
+                                    source_context, validate_receipt, finite, MovingMeasuredBaseline)
 
 MODELS = {'dream': ('dreamlabs/dream-1-beta', 'Dream-1 beta'),
           'dream_flash': ('dreamlabs/dream-1-beta-flash', 'Dream-1 beta Flash')}
@@ -596,7 +596,7 @@ class DreamAdapter:
         # Keep raw encoder degrees separately from encoded model input. This
         # private copy never replaces camera/model provenance or enters the SDK.
         raw_baseline = None
-        if self._plan_context is not None:
+        if observation.get('source') == 'hardware':
             # Collection continues while a previous packet moves. Retain raw
             # fields now; qualify only the tick actually used for a new packet.
             raw_baseline = {key: deepcopy(observation[key]) for key in
@@ -676,18 +676,45 @@ class DreamAdapter:
                 return
             self._stop.wait(max(0, .2 - (time.monotonic() - started)))
 
-    def _wait_for_ticks(self, not_before=None, observed_after=None):
+    def _wait_for_ticks(self, not_before=None, observed_after=None, limiter_generation=None):
+        deadline = time.monotonic() + OBSERVATION_RECOVERY_S
+        waiting = False
         with self._changed:
             while True:
                 if self._failure:
                     raise RuntimeError(self._failure)
                 if self._cancelled():
                     raise RuntimeError('Dream cancelled')
+                if limiter_generation is not None and self._history_generation != limiter_generation:
+                    raise RuntimeError('Dream limiter capture generation changed')
                 ticks = [tick for tick in self._history
                          if observed_after is None or tick['observed_at'] >= observed_after]
                 if (ticks and time.time() - ticks[-1]['observed_at'] <= 5
                         and (not_before is None or ticks[-1]['timestamp'] >= not_before)):
-                    return ticks
+                    if limiter_generation is None:
+                        return ticks
+                    # A capture can finish after completion while its state read
+                    # predates completion. Never look back for an older idle pose.
+                    latest = self._history[-1]
+                    if latest is ticks[-1] and self._stream_available:
+                        if latest.get('capture_generation') != limiter_generation:
+                            raise RuntimeError('Dream limiter capture generation changed')
+                        try:
+                            measured_baseline(latest.get('raw_baseline'), self.robot_id, now=time.time())
+                        except MovingMeasuredBaseline:
+                            pass
+                        else:
+                            if waiting:
+                                self._interaction('model_progress', 'Dream received fresh settled hardware feedback',
+                                                  progress_type='status')
+                            return ticks
+                if limiter_generation is not None:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Dream limiter requires fresh settled hardware feedback; packet refused')
+                    if not waiting:
+                        waiting = True
+                        self._interaction('model_progress', 'Dream waiting for settled hardware feedback before motion',
+                                          progress_type='status')
                 self._changed.wait(.1)
 
     def _recover_worker(self, first_step_id, reason):
@@ -793,7 +820,7 @@ class DreamAdapter:
             self._commanded = self._pending_commanded = None
             self._workspace_reset_pending = False
             self._workspace_feedback = None
-        observed_after = None
+        observed_after = observation.get('observed_at') if self._plan_context is not None else None
         if self._stale_plan_reset_pending:
             try:
                 reset = self._worker.call('reset', cancelled=self._cancelled)
@@ -880,7 +907,8 @@ class DreamAdapter:
                 raise RuntimeError('Dream prediction cancelled; result discarded')
             if reply['ok']:
                 # A collection failure during inference must not dispatch a late reply.
-                latest = self._wait_for_ticks()[-1]
+                latest = (self._wait_for_ticks(None, observed_after, prediction_generation)[-1]
+                          if self._plan_context is not None else self._wait_for_ticks()[-1])
                 if self.steering.pending():
                     # Nothing from this prediction was dispatched. Keep the
                     # completed command anchor, or measured pose on the first
