@@ -499,14 +499,19 @@ class SessionWorker(Worker):
         return self.responses.pop(0) if command=='predict' and self.responses else result
 
 
-def test_session_replacement_requeries_new_input_without_replaying_or_resetting(tmp_path):
+@pytest.mark.parametrize('reason,label', [('expired', 'session expired'),
+    ('unknown', 'session not recognized'), ('serve_died', 'model worker lost'),
+    ('private-provider-text', 'reason unavailable')])
+def test_session_replacement_requeries_new_input_without_replaying_or_resetting(tmp_path,reason,label):
     provider=adapter(tmp_path)
     provider.worker_factory=SessionWorker
+    events=[]
+    provider.interaction_sink=lambda kind,message,**details:events.append((kind,message))
     try:
         points=provider.build_trajectory('move',observation(),0)
         provider.trajectory_completed(observation(),len(points))
         completed=provider._commanded
-        provider._worker.responses=[expired_reply()]
+        provider._worker.responses=[dict(expired_reply(),reason=reason)]
         following=provider.build_trajectory('move',observation(),len(points))
         calls=[payload for command,payload in provider._worker.calls if command=='predict']
         assert len(calls)==3
@@ -514,6 +519,9 @@ def test_session_replacement_requeries_new_input_without_replaying_or_resetting(
         assert calls[2]['commanded']==completed
         assert following[0]['step_id']==len(points)
         assert not any(command=='reset' for command,_ in provider._worker.calls)
+        replacement=[message for kind,message in events if 'model session was replaced' in message]
+        assert len(replacement)==1 and '('+label+')' in replacement[0]
+        assert 'private-provider-text' not in replacement[0]
     finally:
         provider.close_transport()
 
@@ -549,7 +557,38 @@ def test_stop_cancels_session_recovery_before_another_prediction(tmp_path):
         provider.close_transport()
 
 
-def test_worker_error_metadata_does_not_expose_private_text_or_arbitrary_reason(tmp_path,monkeypatch):
+def test_session_replacement_budget_survives_successful_packets_and_prompt_changes(tmp_path):
+    provider = adapter(tmp_path)
+    provider.worker_factory = SessionWorker
+    events = []
+    provider.interaction_sink = lambda kind, message, **details: events.append((kind, details))
+    try:
+        provider.wait_ready(lambda: False)
+        step = 0
+        # A successful packet used to reset the counter, so a provider losing
+        # its model session repeatedly could consume the entire robot lease.
+        for index in range(3):
+            provider._worker.responses = [expired_reply()]
+            points = provider.build_trajectory('move' if index < 2 else 'updated task', observation(), step)
+            step = points[-1]['step_id'] + 1
+            provider.trajectory_completed(observation(), len(points))
+        calls_before = len([c for c, _ in provider._worker.calls if c == 'predict'])
+        provider._worker.responses = [expired_reply()]
+        with pytest.raises(RuntimeError, match='Dream model session recovery limit reached'):
+            provider.build_trajectory('updated task', observation(), step)
+        assert len([c for c, _ in provider._worker.calls if c == 'predict']) == calls_before + 1
+        recoveries = [d for k, d in events if k == 'model_progress' and 'session_recoveries_total' in d]
+        assert [d['session_recoveries_total'] for d in recoveries] == [1, 2, 3]
+        failures = [d for k, d in events if k == 'model_failure']
+        assert failures[-1]['reason'] == 'session_recovery_limit'
+        assert failures[-1]['session_recoveries_total'] == 3
+        assert provider.public_config()['session_recovery_limit'] == 3
+    finally:
+        provider.close_transport()
+
+
+@pytest.mark.parametrize('reason', ['expired', 'unknown', 'serve_died'])
+def test_worker_error_metadata_does_not_expose_private_text_or_arbitrary_reason(tmp_path,monkeypatch,reason):
     monkeypatch.setenv('DREAM_WORK_DIR',str(tmp_path))
     path=Path(__file__).parents[1]/'src/remote_yam/dream_worker.py'
     spec=importlib.util.spec_from_file_location('dream_worker_diagnostics',path)
@@ -557,8 +596,9 @@ def test_worker_error_metadata_does_not_expose_private_text_or_arbitrary_reason(
     class DreamSessionExpired(RuntimeError):
         code='DA-0001';reason='expired';retryable=False;retry_after_s=None
     error=DreamSessionExpired('private credential and server identifiers')
+    error.reason=reason
     reply=worker.error_response(error)
-    assert reply==dict(ok=False,error_type='DreamSessionExpired',code='DA-0001',reason='expired',
+    assert reply==dict(ok=False,error_type='DreamSessionExpired',code='DA-0001',reason=reason,
                        retryable=False,retry_after_s=None)
     assert 'private credential' not in json.dumps(reply)
     error.code='private-code';error.reason='private-reason';error.retry_after_s=float('nan')

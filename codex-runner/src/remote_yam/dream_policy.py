@@ -236,6 +236,10 @@ class DreamAdapter:
         self._capture_sequence = 0
         self._history_generation = 0
         self._worker_recoveries = 0
+        # Bound model-session churn over the whole run, including successful
+        # packets and prompt updates. A per-decision limit alone restarts forever.
+        self._session_recoveries = 0
+        self._session_recovery_limit = 3
         self._workspace_reset_pending = False
         self._workspace_feedback = None
         self._plan_context = None
@@ -385,6 +389,7 @@ class DreamAdapter:
                     execution_mode='sequential_chunks', action_space='eef', ik_solve='traj',
                     max_joint_step_deg=self.max_joint_step_deg,
                     effective_joint_step_deg=self.effective_joint_step_deg,
+                    session_recovery_limit=self._session_recovery_limit,
                     gateway_profile_step_deg=self.gateway_max_step_deg,
                     **({'preparation_before_queue': True} if self._prepare_before_queue else {}),
                     **({'kinematic_calibration': json.loads(json.dumps(self._kinematics['binding'])),
@@ -1046,13 +1051,29 @@ class DreamAdapter:
                            'http_connection_policy', 'timing')}
             if (reply.get('error_type') == 'DreamSessionExpired' and reply.get('code') == 'DA-0001'
                     and session_recoveries == 0):
+                if self._session_recoveries >= self._session_recovery_limit:
+                    self._interaction('model_failure',
+                        'Dream model session recovery limit reached; motion planning stopped',
+                        reason='session_recovery_limit',
+                        session_recoveries_total=self._session_recoveries,
+                        session_recovery_limit=self._session_recovery_limit,
+                        first_step_id=first_step_id)
+                    raise RuntimeError('Dream model session recovery limit reached')
                 # The SDK adopted the replacement and discarded its action.
                 # Request once from NEW input; keep robot lease, Home and step IDs.
                 session_recoveries += 1
+                self._session_recoveries += 1
                 if self.interaction_sink:
+                    replacement_reason = {
+                        'expired': 'session expired',
+                        'unknown': 'session not recognized',
+                        'serve_died': 'model worker lost',
+                    }.get(reply.get('reason'), 'reason unavailable')
                     self.interaction_sink('model_progress',
-                        'Dream model session was replaced; requesting a fresh prediction',
-                        progress_type='status', recovery_attempt=session_recoveries, **diagnostics)
+                        'Dream model session was replaced (' + replacement_reason + '); requesting a fresh prediction',
+                        progress_type='status', recovery_attempt=session_recoveries,
+                        session_recoveries_total=self._session_recoveries,
+                        session_recovery_limit=self._session_recovery_limit, **diagnostics)
                 began = time.monotonic()
                 continue
             if reply.get('reason') != 'pool_warming' or time.monotonic() >= deadline:

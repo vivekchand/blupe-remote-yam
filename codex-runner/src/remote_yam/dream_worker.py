@@ -25,7 +25,7 @@ ERROR_REASONS = {'pool_warming', 'rate_limited', 'pool_full', 'queue_timeout', '
                  'cannot_scale', 'missing', 'unknown_key', 'disabled', 'over_cap', 'not_entitled',
                  'unknown_checkpoint', 'too_large', 'client_outdated', 'malformed', 'new',
                  'expired', 'evicted', 'idle_timeout', 'session_expired', 'server_restart',
-                 'unknown_session', 'session_not_found'}
+                 'unknown_session', 'session_not_found', 'unknown', 'serve_died'}
 
 
 def error_response(error, *, phase=None, timing=None):

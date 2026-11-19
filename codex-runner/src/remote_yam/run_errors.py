@@ -57,6 +57,8 @@ def public_run_error(state):
         # other diagnostics intact instead of guessing their cause from words
         # such as "guard", "invalid" or "refused" in an arbitrary error.
         packet_errors = {
+            'Dream model session recovery limit reached':
+                'Run stopped because the model repeatedly lost its session. No further motion was submitted. Check model service health before starting another run.',
             'Installed trajectory decision refused this packet':
                 'Task Guard refused this motion packet before submission. Open the ClawMetry detailed view for the recorded reason.',
             'Installed trajectory decision is unavailable; packet refused':

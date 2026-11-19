@@ -45,6 +45,20 @@ def test_capture_keeps_raw_hardware_fields_between_packet_contexts(tmp_path):
     assert provider._capture_tick()['raw_baseline']['observed_at'] == api.stamp
 
 
+def test_session_churn_exhaustion_dispatches_no_packet(tmp_path):
+    from test_dream_policy import expired_reply
+    api, controller, provider, _, dispatch = dream_case(tmp_path)
+    provider._session_recoveries = provider._session_recovery_limit
+    calls = []
+    provider._worker.call = lambda command, **payload: calls.append(command) or expired_reply()
+    with pytest.raises(RuntimeError, match='Dream model session recovery limit reached'):
+        dispatch()
+    assert calls == ['predict']
+    assert api.submitted == []
+    assert controller._trajectory is None
+    assert provider._pending_plan is None
+
+
 @pytest.mark.parametrize('expire_during', ['conversion', 'limiter'])
 def test_feedback_expiring_during_local_processing_is_reacquired_without_reprediction(tmp_path, monkeypatch, expire_during):
     import remote_yam.dream_policy as policy
