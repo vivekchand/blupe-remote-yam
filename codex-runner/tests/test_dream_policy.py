@@ -549,6 +549,36 @@ def test_stop_cancels_session_recovery_before_another_prediction(tmp_path):
         provider.close_transport()
 
 
+def test_session_replacement_budget_survives_successful_packets_and_prompt_changes(tmp_path):
+    provider = adapter(tmp_path)
+    provider.worker_factory = SessionWorker
+    events = []
+    provider.interaction_sink = lambda kind, message, **details: events.append((kind, details))
+    try:
+        provider.wait_ready(lambda: False)
+        step = 0
+        # A successful packet used to reset the counter, so a provider losing
+        # its model session repeatedly could consume the entire robot lease.
+        for index in range(3):
+            provider._worker.responses = [expired_reply()]
+            points = provider.build_trajectory('move' if index < 2 else 'updated task', observation(), step)
+            step = points[-1]['step_id'] + 1
+            provider.trajectory_completed(observation(), len(points))
+        calls_before = len([c for c, _ in provider._worker.calls if c == 'predict'])
+        provider._worker.responses = [expired_reply()]
+        with pytest.raises(RuntimeError, match='Dream model session recovery limit reached'):
+            provider.build_trajectory('updated task', observation(), step)
+        assert len([c for c, _ in provider._worker.calls if c == 'predict']) == calls_before + 1
+        recoveries = [d for k, d in events if k == 'model_progress' and 'session_recoveries_total' in d]
+        assert [d['session_recoveries_total'] for d in recoveries] == [1, 2, 3]
+        failures = [d for k, d in events if k == 'model_failure']
+        assert failures[-1]['reason'] == 'session_recovery_limit'
+        assert failures[-1]['session_recoveries_total'] == 3
+        assert provider.public_config()['session_recovery_limit'] == 3
+    finally:
+        provider.close_transport()
+
+
 def test_worker_error_metadata_does_not_expose_private_text_or_arbitrary_reason(tmp_path,monkeypatch):
     monkeypatch.setenv('DREAM_WORK_DIR',str(tmp_path))
     path=Path(__file__).parents[1]/'src/remote_yam/dream_worker.py'

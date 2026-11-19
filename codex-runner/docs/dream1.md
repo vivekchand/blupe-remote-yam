@@ -221,7 +221,13 @@ remains cancellable. Session cleanup releases the Dream session on worker exit. 
 `DreamSessionExpired` / `DA-0001`, it has already adopted a replacement model
 session and discarded that response. The bridge requests one new prediction
 from a new camera/state tick; it does not replay a packet, restart Home or alter
-the robot lease/step IDs. A second replacement during that decision fails. Stop
+the robot lease/step IDs. A second replacement during that decision fails. The
+adapter also permits at most three replacement recoveries across the entire run;
+successful packets and prompt changes do not reset that budget. Another session
+loss stops planning and reports `session_recovery_limit`, instead of repeatedly
+recovering until the robot's time limit. Recovery progress records the total and
+limit, and `public_config()` exposes the limit. This bounds a degraded provider;
+it does not establish task completion or physical stopping. Stop
 can cancel the recovery, and authentication errors do not retry. Logs retain
 allowlisted code/reason/type fields without server text or session identifiers.
 

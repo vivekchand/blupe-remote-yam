@@ -1,6 +1,14 @@
 from remote_yam.run_errors import public_run_error
 
 
+def test_model_session_churn_has_an_actionable_result():
+    for prefix in ('', 'RuntimeError: '):
+        assert public_run_error(dict(status='stopped', error=prefix +
+            'Dream model session recovery limit reached')) == (
+                'Run stopped because the model repeatedly lost its session. '
+                'No further motion was submitted. Check model service health before starting another run.')
+
+
 def test_groot_motion_rejection_is_visible_in_live_and_saved_results(tmp_path):
     from remote_yam.past_runs import RunNames, merge_run_result
     message = ('GR00T action exceeds the runner motion limit; chunk rejected without retiming '
