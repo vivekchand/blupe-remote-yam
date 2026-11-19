@@ -125,6 +125,16 @@ model-record retrieval and per-session setup can remain. Measure fresh processes
 and background trajectory readiness rather than treating a populated directory
 as proof of instant readiness. See the [pinned JAX guide](refs/jax/INDEX.md).
 
+`DreamWorker.supports_deferred_observer` declares support for an optional
+service observer after prequeue preparation. Register trusted module/context
+paths at construction, then create the private context before the first
+prediction. That existing prediction exchange attempts attachment once; no
+extra command or reply is introduced, and commands cannot select paths/modules.
+Capture freezes the first native attempt/session/episode/robot identity and
+retires before another source's SDK input. It never rebinds a process across
+visitors or changes native prediction values. Slow attachment remains within
+the existing prediction deadline and Stop path.
+
 For preparation reused in memory across visitors, a hosted fleet can create one
 `remote_yam.dream_worker_pool.DreamWorkerPool(python, credentials, directory)`.
 Call `prime()` before advertising Dream. It prepares both supported checkpoints

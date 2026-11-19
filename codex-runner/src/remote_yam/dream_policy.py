@@ -118,6 +118,8 @@ def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS, cadenc
 
 
 class DreamWorker:
+    supports_deferred_observer = True
+
     def __init__(self, python, credentials, directory, *, observer_module=None, observer_context_path=None):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)

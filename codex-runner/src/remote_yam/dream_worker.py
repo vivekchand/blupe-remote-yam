@@ -159,6 +159,7 @@ def main():
     except ImportError:
         from worker_observer import WorkerObserver
     observer = None
+    observer_binding_attempted = False
     sdk_trace = DreamSDKTrace(os.environ['DREAM_WORK_DIR'])
 
     def stage_event(kind, message, **details):
@@ -271,7 +272,7 @@ def main():
         # Request payloads/arrays/actions live only in this call's frame, not in
         # the resident command loop after a release/reset. SDK windows are
         # cleared by its documented reset_episode() boundary (SDK 1.0.0).
-        nonlocal client, last_timestamp, prepared, phase, request_started
+        nonlocal client, last_timestamp, prepared, phase, request_started, observer, observer_binding_attempted
         kind = command['command']
         phase = {'prime': 'configure', 'release': 'reset'}.get(kind, kind)
         if kind == 'prime':
@@ -345,6 +346,21 @@ def main():
             last_timestamp = None
             return {}
         if kind == 'predict':
+            # The host may fill its constructor-fixed private context only
+            # after admission. Attach inside this exchange, once, so a slow
+            # extension cannot leave a separate reply on the prediction pipe.
+            if not observer_binding_attempted:
+                observer_binding_attempted = True
+                if ((observer is None or observer.observer is None)
+                        and os.environ.get('YAM_WORKER_OBSERVER_MODULE')
+                        and os.environ.get('YAM_WORKER_OBSERVER_CONTEXT')):
+                    if observer is not None:
+                        observer.close()
+                    observer = WorkerObserver(os.environ['YAM_WORKER_OBSERVER_MODULE'],
+                                              os.environ['YAM_WORKER_OBSERVER_CONTEXT'])
+                    observer.install(client, source_trace=sdk_trace)
+            if observer is not None:
+                observer.bind_source(command.get('observer_context') or {})
             phase = 'observation'
             with stage(spans, 'sdk_observation_update'):
                 for tick in command['ticks']:

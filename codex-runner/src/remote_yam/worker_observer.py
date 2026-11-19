@@ -14,6 +14,8 @@ class WorkerObserver:
     """
     def __init__(self, module_path=None, context_path=None):
         self.observer = None
+        self._source_context = None
+        self._retired = False
         self.state = 'disabled' if not module_path else 'unavailable'
         if not module_path:
             return
@@ -42,8 +44,27 @@ class WorkerObserver:
             except BaseException:
                 self.state = 'unavailable'
 
+    def bind_source(self, context):
+        """Retire capture before any SDK input from another native source."""
+        if self._retired or self.observer is None:
+            return
+        try:
+            source = tuple(context.get(name) for name in
+                           ('attempt_id', 'session_id', 'episode_id', 'robot_id'))
+            valid = all(value is None or isinstance(value, str) for value in source)
+        except BaseException:
+            source, valid = None, False
+        if not valid or (self._source_context is not None and source != self._source_context):
+            self.close()
+            self.observer = None
+            self.state = 'unavailable'
+            self._retired = True
+            return
+        self._source_context = source
+
     @contextmanager
     def prediction(self, context):
+        self.bind_source(context)
         manager = None
         if self.observer is not None:
             try:
