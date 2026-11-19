@@ -125,6 +125,14 @@ model-record retrieval and per-session setup can remain. Measure fresh processes
 and background trajectory readiness rather than treating a populated directory
 as proof of instant readiness. See the [pinned JAX guide](refs/jax/INDEX.md).
 
+An optional service observer can be bound after prequeue preparation through
+`DreamWorker.bind_observer()`. Register its trusted module and context paths
+when constructing the worker, then create the private context before binding.
+The command carries no paths or module names. It requires a configured client,
+refuses replacement of an existing observer, and permits only one attachment
+attempt per process. This hook does not reset the SDK, acquire a robot, make a
+prediction or alter a native result. It is not a cross-visitor rebinding API.
+
 For preparation reused in memory across visitors, a hosted fleet can create one
 `remote_yam.dream_worker_pool.DreamWorkerPool(python, credentials, directory)`.
 Call `prime()` before advertising Dream. It prepares both supported checkpoints

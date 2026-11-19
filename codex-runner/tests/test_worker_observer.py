@@ -162,3 +162,46 @@ def test_null_factory_is_unavailable_not_a_ready_observer(tmp_path):
 def test_extension_import_base_exception_is_unavailable(tmp_path,exception):
     path=extension(tmp_path,f"raise {exception}('private-extension-text')")
     assert WorkerObserver(path).drain()=={'state':'unavailable'}
+
+
+def test_prepared_worker_attaches_only_constructor_fixed_observer_once(tmp_path, monkeypatch):
+    monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    context=tmp_path/'private-config.json'
+    path=extension(tmp_path, '''
+import json
+from contextlib import contextmanager
+class Observer:
+    def __init__(self, value): self.value=value
+    def install(self, client, *, source_trace=None): pass
+    @contextmanager
+    def prediction(self, context): yield
+    def drain(self): return {'run':self.value['run']}
+    def close(self): pass
+def create_observer(*, context_path):
+    with open(context_path) as source: return Observer(json.load(source))
+''')
+    worker=DreamWorker(sys.executable,tmp_path/'unused-credentials',tmp_path/'worker',
+        observer_module=path,observer_context_path=context)
+    try:
+        assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+        context.write_text(json.dumps({'run':'admitted-run'}))
+        rejected=worker.call('attach_observer',observer_module=str(tmp_path/'untrusted.py'))
+        assert not rejected['ok']
+        reply=worker.bind_observer()
+        assert reply['ok'] and reply['result']['observer_state']=='ready'
+        assert worker.call('predict',ticks=[])['observer']=={'run':'admitted-run'}
+        context.write_text(json.dumps({'run':'different-run'}))
+        assert not worker.bind_observer()['ok']
+        assert worker.call('predict',ticks=[])['observer']=={'run':'admitted-run'}
+    finally:worker.close()
+
+
+def test_unregistered_worker_cannot_attach_observer(tmp_path,monkeypatch):
+    monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    worker=DreamWorker(sys.executable,tmp_path/'unused',tmp_path/'worker')
+    try:
+        assert not worker.bind_observer()['ok']
+        assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+        assert not worker.bind_observer()['ok']
+        assert worker.call('predict',ticks=[])['ok']
+    finally:worker.close()

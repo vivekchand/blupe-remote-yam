@@ -165,6 +165,10 @@ class DreamWorker:
             except (OSError, ValueError) as error:
                 raise RuntimeError('Dream worker transport failed (' + type(error).__name__ + ')') from None
 
+    def bind_observer(self, *, cancelled=lambda: False):
+        """Load this process's constructor-fixed observer once after admission."""
+        return self.call('attach_observer', cancelled=cancelled, timeout=10)
+
     def close(self):
         with self.close_lock:
             if self.closed.is_set():

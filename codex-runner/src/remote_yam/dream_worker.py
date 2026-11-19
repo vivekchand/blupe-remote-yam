@@ -159,6 +159,7 @@ def main():
     except ImportError:
         from worker_observer import WorkerObserver
     observer = None
+    observer_binding_attempted = False
     sdk_trace = DreamSDKTrace(os.environ['DREAM_WORK_DIR'])
 
     def stage_event(kind, message, **details):
@@ -271,7 +272,7 @@ def main():
         # Request payloads/arrays/actions live only in this call's frame, not in
         # the resident command loop after a release/reset. SDK windows are
         # cleared by its documented reset_episode() boundary (SDK 1.0.0).
-        nonlocal client, last_timestamp, prepared, phase, request_started
+        nonlocal client, last_timestamp, prepared, phase, request_started, observer, observer_binding_attempted
         kind = command['command']
         phase = {'prime': 'configure', 'release': 'reset'}.get(kind, kind)
         if kind == 'prime':
@@ -329,6 +330,23 @@ def main():
                         'trajectory_variants': configured_variants.get(id(client))}
                        if command.get('fully_prepare') is True else {}),
                     'kinematic_calibration': configured_kinematics.get(id(client))}
+        if kind == 'attach_observer':
+            # A host can prepare before it has a run recorder. It may then fill
+            # the private context path registered at process construction. No
+            # command can select a path/module or rebind an existing observer.
+            if (set(command) != {'command'} or client is None
+                    or id(client) not in configured_rates or observer_binding_attempted
+                    or not os.environ.get('YAM_WORKER_OBSERVER_MODULE')
+                    or not os.environ.get('YAM_WORKER_OBSERVER_CONTEXT')
+                    or observer is not None and observer.observer is not None):
+                raise ValueError('Dream observer cannot be attached now')
+            observer_binding_attempted = True
+            if observer is not None:
+                observer.close()
+            observer = WorkerObserver(os.environ['YAM_WORKER_OBSERVER_MODULE'],
+                                      os.environ['YAM_WORKER_OBSERVER_CONTEXT'])
+            observer.install(client, source_trace=sdk_trace)
+            return {'observer_state': observer.state}
         if kind == 'release':
             with stage(spans, 'sdk_reset'):
                 for current in all_clients():
