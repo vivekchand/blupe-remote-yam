@@ -164,44 +164,67 @@ def test_extension_import_base_exception_is_unavailable(tmp_path,exception):
     assert WorkerObserver(path).drain()=={'state':'unavailable'}
 
 
-def test_prepared_worker_attaches_only_constructor_fixed_observer_once(tmp_path, monkeypatch):
+
+@pytest.mark.parametrize('delay', [0, 10.3])
+def test_first_prediction_attaches_fixed_observer_without_extra_reply_and_retires_changed_source(tmp_path, monkeypatch, delay):
     monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
-    context=tmp_path/'private-config.json'
+    context=tmp_path/'private-config.json';calls=tmp_path/'captured.jsonl'
     path=extension(tmp_path, '''
-import json
+import json,time
 from contextlib import contextmanager
 class Observer:
-    def __init__(self, value): self.value=value
-    def install(self, client, *, source_trace=None): pass
+    def __init__(self, value): self.value=value;self.context=None
+    def install(self, client, *, source_trace=None):
+        self.client=client;self.original=client.get_action
+        def action(*args,**kwargs):
+            if self.context is not None:
+                with open(self.value['calls'],'a') as output:output.write(json.dumps(self.context)+'\\n')
+            return self.original(*args,**kwargs)
+        client.get_action=action
     @contextmanager
-    def prediction(self, context): yield
+    def prediction(self, context):
+        self.context=context
+        try:yield
+        finally:self.context=None
     def drain(self): return {'run':self.value['run']}
-    def close(self): pass
+    def close(self):self.client.get_action=self.original
 def create_observer(*, context_path):
-    with open(context_path) as source: return Observer(json.load(source))
-''')
+    with open(context_path) as source:value=json.load(source)
+    time.sleep(DELAY)
+    return Observer(value)
+'''.replace('DELAY',repr(delay)))
+    marker=tmp_path/'untrusted-loaded'
+    untrusted=tmp_path/'untrusted.py'
+    untrusted.write_text('from pathlib import Path\nPath('+repr(str(marker))+').touch()\n')
+    source=dict(attempt_id='attempt-one',session_id='session-one',episode_id='episode-one',robot_id='yam-1')
     worker=DreamWorker(sys.executable,tmp_path/'unused-credentials',tmp_path/'worker',
         observer_module=path,observer_context_path=context)
     try:
         assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
-        context.write_text(json.dumps({'run':'admitted-run'}))
-        rejected=worker.call('attach_observer',observer_module=str(tmp_path/'untrusted.py'))
-        assert not rejected['ok']
-        reply=worker.bind_observer()
-        assert reply['ok'] and reply['result']['observer_state']=='ready'
-        assert worker.call('predict',ticks=[])['observer']=={'run':'admitted-run'}
-        context.write_text(json.dumps({'run':'different-run'}))
-        assert not worker.bind_observer()['ok']
-        assert worker.call('predict',ticks=[])['observer']=={'run':'admitted-run'}
+        context.write_text(json.dumps({'run':'admitted-run','calls':str(calls)}))
+        reply=worker.call('predict',ticks=[],observer_context=source,observer_module=str(untrusted))
+        assert reply['ok'] and 'action' in reply['result']
+        assert reply['observer']=={'run':'admitted-run'} and not marker.exists()
+        context.write_text(json.dumps({'run':'different-run','calls':str(calls)}))
+        reply=worker.call('predict',ticks=[],observer_context=source)
+        assert reply['ok'] and 'action' in reply['result']
+        assert reply['observer']=={'run':'admitted-run'}
+        # A successfully attached raw observer must stop before another source's
+        # SDK work. Native predictions continue with their original values.
+        for changed in (dict(source,episode_id='replacement-episode'),source):
+            reply=worker.call('predict',ticks=[],observer_context=changed)
+            assert reply['ok'] and 'action' in reply['result']
+            assert reply['observer']=={'state':'unavailable'}
+        assert [json.loads(line) for line in calls.read_text().splitlines()]==[source,source]
     finally:worker.close()
 
 
-def test_unregistered_worker_cannot_attach_observer(tmp_path,monkeypatch):
+def test_unregistered_worker_ignores_command_selected_observer_paths(tmp_path,monkeypatch):
     monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    marker=tmp_path/'untrusted-loaded';path=extension(tmp_path,'from pathlib import Path\nPath('+repr(str(marker))+').touch()\n')
     worker=DreamWorker(sys.executable,tmp_path/'unused',tmp_path/'worker')
     try:
-        assert not worker.bind_observer()['ok']
         assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
-        assert not worker.bind_observer()['ok']
-        assert worker.call('predict',ticks=[])['ok']
+        reply=worker.call('predict',ticks=[],observer_module=str(path),observer_context_path=str(tmp_path/'anything'))
+        assert reply['ok'] and 'action' in reply['result'] and not marker.exists()
     finally:worker.close()

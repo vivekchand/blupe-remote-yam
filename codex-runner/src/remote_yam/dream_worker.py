@@ -330,23 +330,6 @@ def main():
                         'trajectory_variants': configured_variants.get(id(client))}
                        if command.get('fully_prepare') is True else {}),
                     'kinematic_calibration': configured_kinematics.get(id(client))}
-        if kind == 'attach_observer':
-            # A host can prepare before it has a run recorder. It may then fill
-            # the private context path registered at process construction. No
-            # command can select a path/module or rebind an existing observer.
-            if (set(command) != {'command'} or client is None
-                    or id(client) not in configured_rates or observer_binding_attempted
-                    or not os.environ.get('YAM_WORKER_OBSERVER_MODULE')
-                    or not os.environ.get('YAM_WORKER_OBSERVER_CONTEXT')
-                    or observer is not None and observer.observer is not None):
-                raise ValueError('Dream observer cannot be attached now')
-            observer_binding_attempted = True
-            if observer is not None:
-                observer.close()
-            observer = WorkerObserver(os.environ['YAM_WORKER_OBSERVER_MODULE'],
-                                      os.environ['YAM_WORKER_OBSERVER_CONTEXT'])
-            observer.install(client, source_trace=sdk_trace)
-            return {'observer_state': observer.state}
         if kind == 'release':
             with stage(spans, 'sdk_reset'):
                 for current in all_clients():
@@ -363,6 +346,21 @@ def main():
             last_timestamp = None
             return {}
         if kind == 'predict':
+            # The host may fill its constructor-fixed private context only
+            # after admission. Attach inside this exchange, once, so a slow
+            # extension cannot leave a separate reply on the prediction pipe.
+            if not observer_binding_attempted:
+                observer_binding_attempted = True
+                if ((observer is None or observer.observer is None)
+                        and os.environ.get('YAM_WORKER_OBSERVER_MODULE')
+                        and os.environ.get('YAM_WORKER_OBSERVER_CONTEXT')):
+                    if observer is not None:
+                        observer.close()
+                    observer = WorkerObserver(os.environ['YAM_WORKER_OBSERVER_MODULE'],
+                                              os.environ['YAM_WORKER_OBSERVER_CONTEXT'])
+                    observer.install(client, source_trace=sdk_trace)
+            if observer is not None:
+                observer.bind_source(command.get('observer_context') or {})
             phase = 'observation'
             with stage(spans, 'sdk_observation_update'):
                 for tick in command['ticks']:

@@ -118,6 +118,8 @@ def action_waypoints(action, first_step_id, *, max_commands=MAX_COMMANDS, cadenc
 
 
 class DreamWorker:
+    supports_deferred_observer = True
+
     def __init__(self, python, credentials, directory, *, observer_module=None, observer_context_path=None):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -164,10 +166,6 @@ class DreamWorker:
                 raise RuntimeError('Dream request cancelled')
             except (OSError, ValueError) as error:
                 raise RuntimeError('Dream worker transport failed (' + type(error).__name__ + ')') from None
-
-    def bind_observer(self, *, cancelled=lambda: False):
-        """Load this process's constructor-fixed observer once after admission."""
-        return self.call('attach_observer', cancelled=cancelled, timeout=10)
 
     def close(self):
         with self.close_lock:
