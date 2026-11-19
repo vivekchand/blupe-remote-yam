@@ -230,6 +230,9 @@ limit, and `public_config()` exposes the limit. This bounds a degraded provider;
 it does not establish task completion or physical stopping. Stop
 can cancel the recovery, and authentication errors do not retry. Logs retain
 allowlisted code/reason/type fields without server text or session identifiers.
+The documented replacement reasons `expired`, `unknown` and `serve_died` also
+produce bounded progress labels (session expired, session not recognized and
+model worker lost). Unknown reason strings are never included in those labels.
 
 The existing runner executes one packet to completion before asking for the
 next. Dream chunks at the configured 20 Hz are sampled at their 100 ms endpoints

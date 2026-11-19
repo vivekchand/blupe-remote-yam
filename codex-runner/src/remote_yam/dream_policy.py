@@ -1064,8 +1064,13 @@ class DreamAdapter:
                 session_recoveries += 1
                 self._session_recoveries += 1
                 if self.interaction_sink:
+                    replacement_reason = {
+                        'expired': 'session expired',
+                        'unknown': 'session not recognized',
+                        'serve_died': 'model worker lost',
+                    }.get(reply.get('reason'), 'reason unavailable')
                     self.interaction_sink('model_progress',
-                        'Dream model session was replaced; requesting a fresh prediction',
+                        'Dream model session was replaced (' + replacement_reason + '); requesting a fresh prediction',
                         progress_type='status', recovery_attempt=session_recoveries,
                         session_recoveries_total=self._session_recoveries,
                         session_recovery_limit=self._session_recovery_limit, **diagnostics)
