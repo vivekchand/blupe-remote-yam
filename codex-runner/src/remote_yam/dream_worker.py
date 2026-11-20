@@ -160,6 +160,7 @@ def main():
         from worker_observer import WorkerObserver
     observer = None
     observer_binding_attempted = False
+    observer_cleanup_failed = False
     sdk_trace = DreamSDKTrace(os.environ['DREAM_WORK_DIR'])
 
     def stage_event(kind, message, **details):
@@ -272,9 +273,13 @@ def main():
         # Request payloads/arrays/actions live only in this call's frame, not in
         # the resident command loop after a release/reset. SDK windows are
         # cleared by its documented reset_episode() boundary (SDK 1.0.0).
-        nonlocal client, last_timestamp, prepared, phase, request_started, observer, observer_binding_attempted
+        nonlocal client, last_timestamp, prepared, phase, request_started, observer, observer_binding_attempted, observer_cleanup_failed
         kind = command['command']
         phase = {'prime': 'configure', 'release': 'reset'}.get(kind, kind)
+        if observer_cleanup_failed:
+            if kind == 'release':
+                return {'observer_cleanup_ok': False}
+            raise RuntimeError('Dream observer cleanup failed; worker restart is required')
         if kind == 'prime':
             if prepared or clients:
                 raise ValueError('Dream worker is already prepared')
@@ -334,10 +339,17 @@ def main():
             with stage(spans, 'sdk_reset'):
                 for current in all_clients():
                     reset_episode(current)
+            observer_cleanup_ok = observer.close() if observer is not None else True
+            if observer_cleanup_ok:
+                observer = None
+                observer_binding_attempted = False
+            else:
+                observer_cleanup_failed = True
             if prepared:
                 client = None
             last_timestamp = None
-            return {}
+            return ({'observer_cleanup_ok': observer_cleanup_ok}
+                    if os.environ.get('YAM_WORKER_OBSERVER_MODULE') else {})
         if client is None:
             raise RuntimeError('Dream visitor is not configured')
         if kind == 'reset':

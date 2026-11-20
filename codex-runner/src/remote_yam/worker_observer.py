@@ -16,6 +16,8 @@ class WorkerObserver:
         self.observer = None
         self._source_context = None
         self._retired = False
+        self._close_attempted = False
+        self._close_failed = False
         self.state = 'disabled' if not module_path else 'unavailable'
         if not module_path:
             return
@@ -131,9 +133,14 @@ class WorkerObserver:
             return {'state': self.state}
 
     def close(self):
+        if self._close_attempted:
+            return not self._close_failed
+        self._close_attempted = True
         if self.observer is not None:
             try:
                 with redirect_stdout(sys.stderr):
                     self.observer.close()
             except BaseException:
                 self.state = 'unavailable'
+                self._close_failed = True
+        return not self._close_failed

@@ -107,7 +107,8 @@ class DreamWorkerPool:
                 raise RuntimeError('Dream full preparation failed')
             if recovery:
                 clean = worker.call('release', cancelled=self._stop.is_set, timeout=10)
-                if not clean['ok']:
+                if (not clean['ok'] or
+                        clean.get('result', {}).get('observer_cleanup_ok', True) is not True):
                     raise RuntimeError('Dream replacement episode cleanup failed')
             with self._condition:
                 if self._stop.is_set():
@@ -222,7 +223,8 @@ class DreamWorkerPool:
                     worker = self._worker
                 if worker is not None and not self._stop.is_set():
                     reply = worker.call('release', cancelled=self._stop.is_set, timeout=10)
-                    if not reply['ok']:
+                    if (not reply['ok'] or
+                            reply.get('result', {}).get('observer_cleanup_ok', True) is not True):
                         raise RuntimeError('Dream episode cleanup failed')
             except Exception:
                 self._discard(recover=True)
