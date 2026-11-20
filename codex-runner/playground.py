@@ -407,10 +407,15 @@ class HostedRunner:
 
     def verify_local_subscription(self, visitor, provider, model, *, operation):
         from remote_yam.subscription_setup import verify_subscription
+        from remote_yam.subscription_observer import discard_async_result
         try:
             observer = self.subscription_observer(visitor, provider=provider,
                                                    model=model, operation=operation)
-        except BaseException:
+            if discard_async_result(observer):
+                import logging
+                logging.getLogger(__name__).warning('Subscription observer setup returned async work; using native verification')
+                observer = None
+        except Exception:
             import logging
             logging.getLogger(__name__).warning('Subscription observer setup failed; using native verification')
             observer = None

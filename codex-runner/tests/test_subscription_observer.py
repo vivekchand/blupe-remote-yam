@@ -1,4 +1,7 @@
 import json
+import functools
+import gc
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import unittest
@@ -69,7 +72,7 @@ class SubscriptionObserverTests(unittest.TestCase):
         calls = []
         def broken(event):
             calls.append(event)
-            raise BaseException('PRIVATE_CALLBACK_CANARY')
+            raise RuntimeError('PRIVATE_CALLBACK_CANARY')
         adapter = self.adapter()
         with patch('remote_yam.codex_policy.CodexAdapter', return_value=adapter), self.assertLogs(
                 'remote_yam.subscription_observer', level='WARNING') as logs:
@@ -165,6 +168,28 @@ class SubscriptionObserverTests(unittest.TestCase):
         for forbidden in ('HIDDEN_CANARY', 'ANALYSIS_CANARY', 'PRIVATE_CANARY', 'CLI_CANARY'):
             self.assertNotIn(forbidden, json.dumps(result))
 
+    def test_probe_projection_keeps_only_known_public_decision_types_and_names(self):
+        result = probe_response({'output': [
+            {'type': 'message', 'name': 'done', 'arguments': 'WRONG_TYPE'},
+            {'type': 'function_call', 'name': 'unknown', 'arguments': 'UNKNOWN_NAME'},
+            {'type': {}, 'name': [], 'arguments': 'MALFORMED'},
+            {'name': 'done', 'arguments': '{}'}]})
+        self.assertEqual(result['output'], [{'name': 'done', 'arguments': '{}'}])
+        self.assertEqual(result['omitted_items'], 3)
+
+    def test_large_capture_shapes_are_rejected_before_json_encoding(self):
+        deep = None
+        for _ in range(30):
+            deep = {'nested': deep}
+        for payload in ('x' * 300000, [None] * 5000, deep):
+            events = []
+            sink = SubscriptionObserver(events.append)
+            with patch('remote_yam.subscription_observer.json.JSONEncoder.iterencode') as encode:
+                sink.emit('subscription.model', 'returned', outputs=payload)
+                encode.assert_not_called()
+            self.assertEqual(events[0]['capture_coverage'], 'payload_unavailable')
+            self.assertNotIn('outputs', events[0])
+
     def test_callback_state_and_models_remain_call_local_under_concurrency(self):
         barrier, captures = threading.Barrier(2), {'one': [], 'two': []}
         def factory(model, **kwargs):
@@ -200,6 +225,72 @@ class SubscriptionObserverTests(unittest.TestCase):
                 'remote_yam.subscription_observer', level='WARNING'):
             self.assertTrue(verify_subscription('codex', 'selected-model', observer=broken)['verified'])
         probe.assert_called_once_with('codex', 'selected-model')
+
+    def test_callback_and_factory_process_interrupts_preserve_identity_without_probe(self):
+        for error in (KeyboardInterrupt(), SystemExit(7)):
+            for where in ('callback', 'factory'):
+                with self.subTest(kind=type(error).__name__, where=where):
+                    app = object.__new__(HostedRunner)
+                    def interrupted(*args, **kwargs):
+                        raise error
+                    app.subscription_observer = interrupted if where == 'factory' else lambda *args, **kwargs: interrupted
+                    with patch('remote_yam.subscription_setup.subscription_status') as status, patch(
+                            'remote_yam.subscription_setup.probe_subscription') as probe:
+                        with self.assertRaises(type(error)) as caught:
+                            app.verify_local_subscription(object(), 'codex', 'model', operation='run')
+                    self.assertIs(caught.exception, error)
+                    status.assert_not_called()
+                    probe.assert_not_called()
+
+    def test_callback_interrupt_after_model_return_preserves_identity_and_cleanup(self):
+        for error in (KeyboardInterrupt(), SystemExit(7)):
+            adapter, calls = self.adapter(), []
+            def interrupted(event):
+                calls.append(event)
+                if event['state'] == 'returned':
+                    raise error
+            with patch('remote_yam.codex_policy.CodexAdapter', return_value=adapter):
+                with self.assertRaises(type(error)) as caught:
+                    probe_subscription('codex', observer=interrupted)
+            self.assertIs(caught.exception, error)
+            adapter._post_json.assert_called_once()
+            adapter._workspace.cleanup.assert_called_once()
+            self.assertEqual(len(calls), 2)
+
+    def test_async_callbacks_and_factory_results_are_rejected_without_warnings_or_awaiting(self):
+        entered = []
+        async def async_callback(*args, **kwargs):
+            entered.append('coroutine body')
+        async def async_generator(*args, **kwargs):
+            entered.append('generator body')
+            yield None
+        class AsyncCallable:
+            async def __call__(self, *args, **kwargs):
+                entered.append('async call body')
+        callbacks = [async_callback, functools.partial(async_callback), AsyncCallable(),
+                     functools.partial(AsyncCallable()), async_generator,
+                     lambda event: async_callback(event)]
+        for callback in callbacks:
+            with self.subTest(callback_type=type(callback).__name__), warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter('always')
+                with patch('remote_yam.subscription_setup.subscription_status', return_value={
+                        'ready': True, 'label': 'Astra'}), patch(
+                        'remote_yam.subscription_setup.probe_subscription', return_value='selected-model') as probe:
+                    self.assertTrue(verify_subscription('codex', 'model', observer=callback)['verified'])
+                gc.collect()
+                probe.assert_called_once_with('codex', 'model')
+                self.assertEqual([w for w in captured if issubclass(w.category, RuntimeWarning)], [])
+        app = object.__new__(HostedRunner)
+        for factory in (async_callback, lambda *args, **kwargs: async_callback()):
+            app.subscription_observer = factory
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter('always')
+                with patch('remote_yam.subscription_setup.verify_subscription', return_value={'ready': False}) as verify:
+                    app.verify_local_subscription(object(), 'codex', 'model', operation='check')
+                gc.collect()
+                verify.assert_called_once_with('codex', 'model')
+                self.assertEqual([w for w in captured if issubclass(w.category, RuntimeWarning)], [])
+        self.assertEqual(entered, [])
 
     def test_trusted_host_factory_is_opt_in_and_failure_preserves_verification(self):
         app, visitor, result = object.__new__(HostedRunner), object(), {'ready': False}
