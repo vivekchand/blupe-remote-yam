@@ -228,3 +228,105 @@ def test_unregistered_worker_ignores_command_selected_observer_paths(tmp_path,mo
         reply=worker.call('predict',ticks=[],observer_module=str(path),observer_context_path=str(tmp_path/'anything'))
         assert reply['ok'] and 'action' in reply['result'] and not marker.exists()
     finally:worker.close()
+
+
+def test_close_reports_sticky_extension_cleanup_failure(tmp_path):
+    path=extension(tmp_path, '''
+class Observer:
+    def __init__(self):self.calls=0
+    def close(self):
+        self.calls+=1
+        raise RuntimeError('synthetic cleanup failure')
+def create_observer(*,context_path):return Observer()
+''')
+    value=WorkerObserver(path)
+    assert value.close() is False
+    assert value.close() is False
+    assert value.observer.calls==1
+    assert WorkerObserver().close() is True
+
+
+def test_actual_worker_release_rearms_only_the_fixed_observer_for_next_guest(tmp_path,monkeypatch):
+    monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    context=tmp_path/'private-config.json'
+    path=extension(tmp_path, '''
+import json
+from contextlib import contextmanager
+class Observer:
+    def __init__(self,value):self.value=value;self.context=None
+    def install(self,client,**kwargs):
+        self.client=client;self.original=client.get_action
+        def action(*args,**kwargs):return self.original(*args,**kwargs)
+        self.wrapper=action;client.get_action=action
+    @contextmanager
+    def prediction(self,context):
+        self.context=context
+        yield
+    def drain(self):return {'run':self.value['run'],'call_id':(self.context or {}).get('call_id')}
+    def close(self):
+        if self.client.get_action is self.wrapper:self.client.get_action=self.original
+def create_observer(*,context_path):
+    with open(context_path) as stream:value=json.load(stream)
+    return Observer(value) if value.get('enabled',True) else None
+''')
+    context.write_text(json.dumps({'run':'first'}))
+    worker=DreamWorker(sys.executable,tmp_path/'synthetic-credentials',tmp_path/'worker',
+        observer_module=path,observer_context_path=context)
+    try:
+        for run in ('first',None,'second'):
+            context.write_text(json.dumps({'run':run,'enabled':run is not None}))
+            assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+            reply=worker.call('predict',ticks=[],observer_context={'call_id':'a'*32,'episode_id':str(run)})
+            assert reply['ok']
+            if run is not None:assert reply['observer']['run']==run
+            else:assert reply['observer'].get('state')=='unavailable'
+            released=worker.call('release')
+            assert released['ok'] and released['result']=={'observer_cleanup_ok':True}
+    finally:worker.close()
+
+
+def test_unconfigured_worker_release_result_stays_unchanged(tmp_path,monkeypatch):
+    monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    worker=DreamWorker(sys.executable,tmp_path/'synthetic-credentials',tmp_path/'worker')
+    try:
+        assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+        assert worker.call('release')['result']=={}
+    finally:worker.close()
+
+
+def test_failed_observer_release_stays_failed_and_refuses_new_guest_work(tmp_path,monkeypatch):
+    monkeypatch.setenv('PYTHONPATH',str(controlled_sdk(tmp_path)))
+    context=tmp_path/'private-config.json';calls=tmp_path/'synthetic-calls.jsonl'
+    path=extension(tmp_path, '''
+import json
+from contextlib import contextmanager
+class Observer:
+    def __init__(self,value):self.value=value
+    def install(self,client,**kwargs):
+        original=client.get_action
+        def action(*args,**kwargs):
+            with open(self.value['calls'],'a') as stream:stream.write(self.value['run']+'\\n')
+            return original(*args,**kwargs)
+        client.get_action=action
+    @contextmanager
+    def prediction(self,context):yield
+    def drain(self):return {'run':self.value['run']}
+    def close(self):raise RuntimeError('synthetic cleanup failure')
+def create_observer(*,context_path):
+    with open(context_path) as stream:return Observer(json.load(stream))
+''')
+    context.write_text(json.dumps({'run':'first','calls':str(calls)}))
+    worker=DreamWorker(sys.executable,tmp_path/'synthetic-credentials',tmp_path/'worker',
+        observer_module=path,observer_context_path=context)
+    try:
+        assert worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+        assert worker.call('predict',ticks=[],observer_context={'episode_id':'first'})['ok']
+        before=calls.read_bytes()
+        for _ in range(2):
+            release=worker.call('release')
+            assert release['ok'] and release['result']=={'observer_cleanup_ok':False}
+        context.write_text(json.dumps({'run':'second','calls':str(calls)}))
+        assert not worker.call('configure',checkpoint='dreamlabs/dream-1-beta')['ok']
+        assert not worker.call('predict',ticks=[],observer_context={'episode_id':'second'})['ok']
+        assert calls.read_bytes()==before
+    finally:worker.close()

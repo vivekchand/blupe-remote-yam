@@ -164,6 +164,20 @@ def test_failed_reset_discards_process_before_reuse(resident,tmp_path):
     next_worker.close()
 
 
+@pytest.mark.parametrize('cleanup',[False,0,'true',None])
+def test_observer_cleanup_must_be_confirmed_before_pool_reuse(resident,tmp_path,cleanup):
+    pool,credentials,*_=resident
+    worker=loan(pool,credentials,tmp_path/'first',MODELS['dream'][0])
+    physical=pool._worker;original=physical.call
+    def call(command,**payload):
+        if command=='release':return {'ok':True,'result':{'observer_cleanup_ok':cleanup}}
+        return original(command,**payload)
+    physical.call=call
+    worker.close();wait_for(lambda:not pool.status()['busy'])
+    assert physical.process.poll() is not None
+    assert not pool.status()['ready']
+
+
 def test_prepared_credentials_cannot_be_replaced(resident,tmp_path):
     pool,_,_,*_=resident
     with pytest.raises(ValueError,match='credentials/interpreter differ'):
