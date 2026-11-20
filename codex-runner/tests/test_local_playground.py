@@ -203,6 +203,53 @@ class LocalPlaygroundTests(unittest.IsolatedAsyncioTestCase):
         code,_=await self.call('/api/stop',{})
         self.assertEqual(code,200)
 
+    async def test_subscription_observer_is_host_selected_for_check_and_run(self):
+        factories, events = [], []
+        def observer(visitor, **scope):
+            factories.append((visitor, scope))
+            return events.append
+        self.app.subscription_observer = observer
+        _, session = await self.call('/api/session', {})
+        self.csrf = session['csrf']
+        self.assertEqual(factories, [])  # Page load is not live verification.
+        code, result = await self.call('/api/codex/check', {'model': 'gpt-6-astra',
+            'observer': 'request-fields-cannot-select-callbacks'})
+        self.assertEqual(code, 200)
+        self.assertTrue(result['verified'])
+        self.assertEqual(factories[-1][1], {'provider': 'codex', 'model': 'gpt-6-astra', 'operation': 'check'})
+        self.assertEqual(self.providers, [])
+        code, _ = await self.call('/api/run', {'provider': 'codex', 'model': 'gpt-6-astra',
+            'prompt': 'Test task', 'runner_name': 'Local test'})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(factories), 2)
+        self.assertEqual(factories[-1][1]['operation'], 'run')
+        self.assertEqual(self.providers, [('codex', '', 'gpt-6-astra')])
+        self.assertEqual(self.probe.call_count, 2)
+        self.assertNotIn('subscription.model', [e['name'] for e in events])  # The inert probe stub did not invoke a model.
+        _, state = await self.call('/api/status')
+        self.assertEqual(state['status'], 'queued')
+        code, _ = await self.call('/api/run', {'provider': 'codex', 'model': 'gpt-6-astra',
+            'prompt': 'Test task', 'runner_name': 'Local test'})
+        self.assertEqual(code, 409)
+        self.assertEqual(len(factories), 2)  # Busy rejection never reaches the probe.
+
+    async def test_subscription_observer_is_not_called_before_native_auth_and_validation(self):
+        observer = unittest.mock.Mock(return_value=lambda event: None)
+        self.app.subscription_observer = observer
+        code, _ = await self.call('/api/codex/check', {'model': 'gpt-6-astra'})
+        self.assertNotEqual(code, 200)
+        observer.assert_not_called()
+        _, session = await self.call('/api/session', {})
+        self.csrf = 'wrong-token'
+        code, _ = await self.call('/api/codex/check', {'model': 'gpt-6-astra'})
+        self.assertNotEqual(code, 200)
+        observer.assert_not_called()
+        self.csrf = session['csrf']
+        code, _ = await self.call('/api/codex/check', {'model': []})
+        self.assertEqual(code, 400)
+        observer.assert_not_called()
+        self.probe.assert_not_called()
+
     async def test_robohouse_session_exposes_configured_continuous_stream(self):
         stream = {'path': 'robo-house', 'cameras': ['top', 'left', 'right']}
         rid = 'robot-ba8413962083809c'
