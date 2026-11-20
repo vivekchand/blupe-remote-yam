@@ -22,13 +22,15 @@ def subscription_status(provider):
             'availability_note': 'Run and Check again send a small verification request using your subscription.'}
 
 
-def probe_subscription(provider, model=''):
+def probe_subscription(provider, model='', *, observer=None):
     """Exercise the same CLI, model and credentials as inference, in a fresh workspace.
 
     This adapter is never attached to a controller or Session API. There are no
     camera frames, user tasks or robot state in the text-only request, and any
     returned decision is discarded rather than executed.
     """
+    from .subscription_observer import observer_for, probe_response, probe_settings
+    observed = observer_for(observer)
     if provider == 'claude':
         from .claude_policy import ClaudeAdapter, DEFAULT_MODEL
         adapter = ClaudeAdapter(model or DEFAULT_MODEL, timeout_s=45)
@@ -39,13 +41,21 @@ def probe_subscription(provider, model=''):
         raise ValueError('Unknown subscription provider')
     try:
         adapter._expected_camera_count = 0
-        result = adapter._post_json({'input': [{'role': 'user', 'content': [{
+        payload = {'input': [{'role': 'user', 'content': [{
             'type': 'input_text', 'text': 'Subscription connection check only, with no robot connected. '
             'No images are provided. Do not use tools. Return action done, all targets null, '
-            'summary Connection verified, and empty strings for other text fields.'}]}], 'tools': []})
-        output = result.get('output') or []
-        if len(output) != 1 or output[0].get('name') != 'done':
-            raise RuntimeError('Subscription check did not return the required completion.')
+            'summary Connection verified, and empty strings for other text fields.'}]}], 'tools': []}
+        with observed.span('subscription.model', provider=provider, model=adapter.model,
+                           inputs=payload, transport_coverage='structured_cli_turn',
+                           **(probe_settings(adapter) if observed.callback is not None else {})) as report:
+            result = adapter._post_json(payload)
+            if observed.callback is not None:
+                report['outputs'] = probe_response(result)
+        with observed.span('subscription.validate', provider=provider, model=adapter.model) as report:
+            output = result.get('output') or []
+            if len(output) != 1 or output[0].get('name') != 'done':
+                raise RuntimeError('Subscription check did not return the required completion.')
+            report['connection_verified'] = True
         return adapter.model
     finally:
         adapter._workspace.cleanup()
@@ -66,14 +76,26 @@ def subscription_failure(provider, error, *, setup=None):
     return {**setup, 'ready': False, 'verified': False, 'state': state, 'message': message}
 
 
-def verify_subscription(provider, model=''):
-    setup = subscription_status(provider)
-    if not setup['ready']:
-        return setup
-    try:
-        verified_model = probe_subscription(provider, model)
-    except (RuntimeError, OSError) as exc:
-        return subscription_failure(provider, exc, setup=setup)
-    return {**setup, 'ready': True, 'verified': True, 'state': 'verified',
-            'model': verified_model, 'verified_at': time.time(),
-            'message': f"{setup['label']} subscription verified with a live model response. Your run can now join the queue."}
+def verify_subscription(provider, model='', *, observer=None):
+    from .subscription_observer import SubscriptionObserver
+    observed = SubscriptionObserver(observer)
+    with observed.span('subscription.verify', provider=provider, model=model) as result_report:
+        with observed.span('subscription.status', provider=provider) as status_report:
+            setup = subscription_status(provider)
+            status_report.update(ready=setup['ready'], verified=False, result_state=setup.get('state'))
+        if not setup['ready']:
+            result_report.update(ready=setup['ready'], verified=False, result_state=setup.get('state'))
+            return setup
+        try:
+            with observed.span('subscription.probe', provider=provider, model=model):
+                # Keep the default call signature for existing trusted integrations.
+                verified_model = (probe_subscription(provider, model) if observed.callback is None else
+                                  probe_subscription(provider, model, observer=observed))
+        except (RuntimeError, OSError) as exc:
+            result = subscription_failure(provider, exc, setup=setup)
+        else:
+            result = {**setup, 'ready': True, 'verified': True, 'state': 'verified',
+                      'model': verified_model, 'verified_at': time.time(),
+                      'message': f"{setup['label']} subscription verified with a live model response. Your run can now join the queue."}
+        result_report.update(ready=result['ready'], verified=result['verified'], result_state=result.get('state'))
+        return result

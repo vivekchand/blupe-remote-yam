@@ -396,6 +396,33 @@ class HostedRunner:
         """Optional actions after visitor, Origin and CSRF validation."""
         return False
 
+    def subscription_observer(self, visitor, *, provider, model, operation):
+        """Trusted host hook, never selected from request fields.
+
+        Return a nonblocking callback for this verification only, or None.
+        A host owns redaction, capture consent and expiry. No robot authority
+        is created by subscription observations. See subscription_observer.py.
+        """
+        return None
+
+    def verify_local_subscription(self, visitor, provider, model, *, operation):
+        from remote_yam.subscription_setup import verify_subscription
+        from remote_yam.subscription_observer import discard_async_result
+        try:
+            observer = self.subscription_observer(visitor, provider=provider,
+                                                   model=model, operation=operation)
+            if discard_async_result(observer):
+                import logging
+                logging.getLogger(__name__).warning('Subscription observer setup returned async work; using native verification')
+                observer = None
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning('Subscription observer setup failed; using native verification')
+            observer = None
+        if observer is None:
+            return verify_subscription(provider, model)
+        return verify_subscription(provider, model, observer=observer)
+
     async def chat_setup(self, visitor):
         return {'reaction_cursor':self.reactions.cursor, 'chat_scope':'runner'}
 
@@ -1036,21 +1063,19 @@ class HostedRunner:
                 from remote_yam.model_catalog import discover_models
                 result = await asyncio.to_thread(discover_models, name, key if name in ('openai', 'anthropic') else '')
             elif path == '/api/codex/check' and self.local_codex:
-                from remote_yam.subscription_setup import verify_subscription
                 from remote_yam.model_catalog import selected_model
                 try:
                     model = selected_model('codex', payload.get('model', ''))
                 except ValueError as exc:
                     raise RequestError(400, str(exc)) from None
-                result = await asyncio.to_thread(verify_subscription, 'codex', model)
+                result = await asyncio.to_thread(self.verify_local_subscription, visitor, 'codex', model, operation='check')
             elif path == '/api/claude/check' and self.local_claude:
-                from remote_yam.subscription_setup import verify_subscription
                 from remote_yam.model_catalog import selected_model
                 try:
                     model = selected_model('claude', payload.get('model', ''))
                 except ValueError as exc:
                     raise RequestError(400, str(exc)) from None
-                result = await asyncio.to_thread(verify_subscription, 'claude', model)
+                result = await asyncio.to_thread(self.verify_local_subscription, visitor, 'claude', model, operation='check')
             elif path in {"/api/stop", "/api/credentials/clear", "/api/disconnect", "/api/operator"}:
                 result = await asyncio.to_thread(self.control, visitor, path)
                 if path == "/api/disconnect":
@@ -1380,8 +1405,7 @@ class HostedRunner:
                     | ({'anthropic'} | ({'claude'} if self.local_claude else set()) if claude_supported else set())):
                 raise RequestError(400, 'This robot requires an OpenAI or supported local Codex runner')
             if name in {'codex', 'claude'}:
-                from remote_yam.subscription_setup import verify_subscription
-                setup = verify_subscription(name, model)
+                setup = self.verify_local_subscription(visitor, name, model, operation='run')
                 visitor.subscription_prompts[name] = setup['setup_prompt']
                 if not setup['ready']:
                     raise RequestError(409, f"{setup['label']} needs setup on this computer. " + setup['message'], setup=setup)
