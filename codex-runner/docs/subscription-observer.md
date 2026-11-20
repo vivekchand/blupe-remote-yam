@@ -64,3 +64,17 @@ These are runner boundaries, not upstream HTTP attempts. This seam does not
 change the existing visitor-lock wait around preflight, promise preflight
 cancellation, prove physical stopping or verify a robot task. Private request
 history and correlation with admitted tasks belong to the hosting product.
+
+The authenticated explicit check routes use
+`HostedRunner.check_local_subscription(visitor, provider, model='')`. This
+synchronous entry includes the existing model selection/validation before
+calling `verify_local_subscription(..., operation='check')` once. A trusted
+host can wrap that entry to retain a rejected model check, without creating a
+task or changing the observer factory's post-validation contract. The routes
+retain their fixed provider and availability gates and schedule one worker
+call. Authentication, Origin and CSRF checks still precede the entry.
+
+A host wrapping both entries must retain one call-local request context and
+finalize it in the owning synchronous worker. A blank model may become the
+native canonical default, so raw-model equality is not an ownership check.
+Cancelling an HTTP await does not cancel the worker or prove the probe stopped.

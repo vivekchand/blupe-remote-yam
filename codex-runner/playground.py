@@ -423,6 +423,19 @@ class HostedRunner:
             return verify_subscription(provider, model)
         return verify_subscription(provider, model, observer=observer)
 
+    def check_local_subscription(self, visitor, provider, model=''):
+        """Explicit authenticated check entry, including model validation.
+
+        Hosts can observe a rejected model before verification starts. This
+        entry creates no task or robot authority and keeps native verification.
+        """
+        from remote_yam.model_catalog import selected_model
+        try:
+            model = selected_model(provider, model)
+        except ValueError as exc:
+            raise RequestError(400, str(exc)) from None
+        return self.verify_local_subscription(visitor, provider, model, operation='check')
+
     async def chat_setup(self, visitor):
         return {'reaction_cursor':self.reactions.cursor, 'chat_scope':'runner'}
 
@@ -1063,19 +1076,9 @@ class HostedRunner:
                 from remote_yam.model_catalog import discover_models
                 result = await asyncio.to_thread(discover_models, name, key if name in ('openai', 'anthropic') else '')
             elif path == '/api/codex/check' and self.local_codex:
-                from remote_yam.model_catalog import selected_model
-                try:
-                    model = selected_model('codex', payload.get('model', ''))
-                except ValueError as exc:
-                    raise RequestError(400, str(exc)) from None
-                result = await asyncio.to_thread(self.verify_local_subscription, visitor, 'codex', model, operation='check')
+                result = await asyncio.to_thread(self.check_local_subscription, visitor, 'codex', payload.get('model', ''))
             elif path == '/api/claude/check' and self.local_claude:
-                from remote_yam.model_catalog import selected_model
-                try:
-                    model = selected_model('claude', payload.get('model', ''))
-                except ValueError as exc:
-                    raise RequestError(400, str(exc)) from None
-                result = await asyncio.to_thread(self.verify_local_subscription, visitor, 'claude', model, operation='check')
+                result = await asyncio.to_thread(self.check_local_subscription, visitor, 'claude', payload.get('model', ''))
             elif path in {"/api/stop", "/api/credentials/clear", "/api/disconnect", "/api/operator"}:
                 result = await asyncio.to_thread(self.control, visitor, path)
                 if path == "/api/disconnect":
