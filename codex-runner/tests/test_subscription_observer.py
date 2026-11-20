@@ -7,12 +7,40 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from playground import HostedRunner
+from playground import HostedRunner, RequestError
 from remote_yam.subscription_observer import SubscriptionObserver, probe_response
 from remote_yam.subscription_setup import probe_subscription, verify_subscription
 
 
 class SubscriptionObserverTests(unittest.TestCase):
+    def test_explicit_check_entry_validates_once_and_preserves_verification_result(self):
+        visitor=object();runner=HostedRunner.__new__(HostedRunner);result=object()
+        runner.verify_local_subscription=Mock(return_value=result)
+        for provider in ('codex','claude'):
+            with self.subTest(provider=provider),patch('remote_yam.model_catalog.selected_model',return_value='canonical-model') as selected:
+                self.assertIs(runner.check_local_subscription(visitor,provider),result)
+                selected.assert_called_once_with(provider,'')
+                runner.verify_local_subscription.assert_called_once_with(visitor,provider,'canonical-model',operation='check')
+                runner.verify_local_subscription.reset_mock()
+
+    def test_explicit_check_entry_rejects_model_before_verification_with_original_public_error(self):
+        runner=HostedRunner.__new__(HostedRunner);runner.verify_local_subscription=Mock()
+        for value in ([],None,'not-a-fixture-model'):
+            with self.subTest(value=value),self.assertRaises(RequestError) as caught:
+                runner.check_local_subscription(object(),'codex',value)
+            self.assertEqual(caught.exception.status,400)
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertTrue(caught.exception.__suppress_context__)
+        runner.verify_local_subscription.assert_not_called()
+
+    def test_explicit_check_entry_preserves_native_errors_and_process_interrupts(self):
+        runner=HostedRunner.__new__(HostedRunner);runner.verify_local_subscription=Mock()
+        for failure in (RuntimeError('inert native failure'),KeyboardInterrupt(),SystemExit(17)):
+            with self.subTest(type=type(failure).__name__),patch('remote_yam.model_catalog.selected_model',return_value='selected'):
+                runner.verify_local_subscription.side_effect=failure
+                with self.assertRaises(type(failure)) as caught:runner.check_local_subscription(object(),'codex','requested')
+                self.assertIs(caught.exception,failure)
+
     def adapter(self, model='selected-model'):
         adapter = Mock(model=model)
         adapter.reasoning_effort, adapter.response_speed, adapter._timeout_s = 'low', 'fast', 45

@@ -250,6 +250,27 @@ class LocalPlaygroundTests(unittest.IsolatedAsyncioTestCase):
         observer.assert_not_called()
         self.probe.assert_not_called()
 
+    async def test_explicit_check_entry_follows_auth_and_includes_rejected_model(self):
+        entries=[];original=getattr(self.app,'check_local_subscription',None)
+        def entry(visitor,provider,model=''):
+            entries.append((visitor,provider,model))
+            self.assertIsNotNone(original)
+            return original(visitor,provider,model)
+        self.app.check_local_subscription=entry
+        code,_=await self.call('/api/codex/check',{'model':[]})
+        self.assertNotEqual(code,200);self.assertEqual(entries,[])
+        _,session=await self.call('/api/session',{});self.csrf='wrong-token'
+        code,_=await self.call('/api/codex/check',{'model':[]})
+        self.assertNotEqual(code,200);self.assertEqual(entries,[])
+        self.csrf=session['csrf']
+        code,_=await self.call('/api/codex/check',{'model':[], 'check_local_subscription':'request-cannot-select-a-hook'})
+        self.assertEqual(code,400);self.assertEqual(len(entries),1)
+        self.assertEqual(entries[0][1:],('codex',[]));self.probe.assert_not_called()
+        code,result=await self.call('/api/codex/check',{})
+        self.assertEqual(code,200);self.assertTrue(result['verified'])
+        self.assertEqual(entries[-1][1:],('codex',''));self.assertEqual(self.probe.call_count,1)
+        self.assertEqual(self.providers,[])
+
     async def test_robohouse_session_exposes_configured_continuous_stream(self):
         stream = {'path': 'robo-house', 'cameras': ['top', 'left', 'right']}
         rid = 'robot-ba8413962083809c'
