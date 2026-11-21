@@ -6,6 +6,7 @@ No fork of a JAX process and no sharing of an active SDK episode is involved.
 """
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from collections import deque
+import json
 import logging
 from pathlib import Path
 import threading
@@ -18,7 +19,19 @@ LOG = logging.getLogger(__name__)
 
 class DreamWorkerPool:
     def __init__(self, python, credentials, directory, *, worker_factory=DreamWorker,
-                 recovery_delays=(1., 10., 30.), recovery_window=600., prime_timeout=360.):
+                 recovery_delays=(1., 10., 30.), recovery_window=600., prime_timeout=360.,
+                 kinematics=None):
+        self._kinematics_json = None
+        if kinematics is not None:
+            try:
+                if not isinstance(kinematics, dict):
+                    raise ValueError('Expected an object')
+                encoded = json.dumps(kinematics, allow_nan=False, separators=(',', ':'))
+                if len(encoded.encode('utf-8')) > 256 * 1024:
+                    raise ValueError('Profile exceeds its limit')
+                self._kinematics_json = encoded
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                raise ValueError('Prepared Dream kinematics configuration is invalid') from None
         self.python = str(python)
         self.credentials = str(Path(credentials).expanduser().resolve())
         self.directory = Path(directory)
@@ -43,6 +56,12 @@ class DreamWorkerPool:
     def _credentials_revision(self):
         info = Path(self.credentials).stat()
         return info.st_ino, info.st_size, info.st_mtime_ns
+
+    def _kinematic_options(self):
+        # One server-selected geometry for the physical process lifetime.
+        # Each command gets a detached copy; visitors cannot replace this.
+        return ({'kinematics': json.loads(self._kinematics_json)}
+                if self._kinematics_json is not None else {})
 
     def status(self):
         with self._condition:
@@ -102,7 +121,7 @@ class DreamWorkerPool:
                     raise RuntimeError('Dream preparation cancelled')
                 self._worker = worker
             reply = worker.call('prime', checkpoints=[m[0] for m in MODELS.values()],
-                                cancelled=self._stop.is_set, timeout=timeout)
+                                cancelled=self._stop.is_set, timeout=timeout, **self._kinematic_options())
             if not reply['ok'] or reply.get('result', {}).get('fully_ready') is not True:
                 raise RuntimeError('Dream full preparation failed')
             if recovery:
@@ -161,7 +180,7 @@ class DreamWorkerPool:
         # Same exclusive owner, fresh SDK session and empty observation window.
         try:
             reply = self._worker.call('configure', checkpoint=checkpoint, action_hz=action_hz,
-                                      cancelled=self._stop.is_set, timeout=180)
+                                      cancelled=self._stop.is_set, timeout=180, **self._kinematic_options())
             if not reply['ok']:
                 raise RuntimeError('Dream recovered worker configuration failed')
         except Exception:
